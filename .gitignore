@@ -1,0 +1,31 @@
+# Gradle and Android build output
+.gradle/
+.gradle-user-home/
+.kotlin/
+build/
+app/build/
+
+# Local SDK/JDK used only to perform workspace builds
+.local-tooling/
+local.properties
+
+# Android Studio
+.idea/
+*.iml
+captures/
+
+# Local machine files
+*.log
+.DS_Store
+Thumbs.db
+
+# Release artifacts and signing material
+*.apk
+*.aab
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+keystore.properties
+signing.properties

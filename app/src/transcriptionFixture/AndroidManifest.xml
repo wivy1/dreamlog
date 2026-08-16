@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission
+        android:name="android.permission.INTERNET"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+        tools:node="remove" />
+
+    <application
+        android:label="DreamLog transcription fixtures"
+        tools:replace="android:label">
+
+        <!-- This fixture package is separate from both DreamLog and its disposable test host. -->
+        <activity
+            android:name=".MainActivity"
+            tools:node="remove" />
+        <service
+            android:name=".capture.NightListeningService"
+            tools:node="remove" />
+
+        <activity
+            android:name=".feasibility.TranscriptionBenchmarkActivity"
+            android:exported="true"
+            android:label="Transcription fixtures">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".feasibility.AsrBenchmarkActivity"
+            android:exported="true"
+            android:label="Local ASR benchmark"
+            android:launchMode="singleTop" />
+
+        <activity
+            android:name=".feasibility.ParakeetLongFormSmokeActivity"
+            android:exported="true"
+            android:label="Parakeet long-form smoke test"
+            android:launchMode="singleTop" />
+    </application>
+
+</manifest>

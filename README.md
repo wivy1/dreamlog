@@ -32,19 +32,19 @@ Dream audio, raw transcripts, and organized dreams stay in DreamLog's private lo
   <tr>
     <td width="25%" valign="top">
       <p align="center"><strong>Ready to start</strong></p>
-      <a href="docs/images/01-ready-to-start.webp"><img src="docs/images/01-ready-to-start.webp" alt="DreamLog ready to start with dream history"></a>
+      <a href="docs/images/01-ready-to-start.png"><img src="docs/images/01-ready-to-start.png" alt="DreamLog ready to start with dream history"></a>
     </td>
     <td width="25%" valign="top">
       <p align="center"><strong>Local model setup</strong></p>
-      <a href="docs/images/02-local-models.webp"><img src="docs/images/02-local-models.webp" alt="DreamLog local transcription and enrichment model setup"></a>
+      <a href="docs/images/02-local-models.png"><img src="docs/images/02-local-models.png" alt="DreamLog local transcription and enrichment model setup"></a>
     </td>
     <td width="25%" valign="top">
       <p align="center"><strong>Enriching a dream</strong></p>
-      <a href="docs/images/03-enriching-dreams.webp"><img src="docs/images/03-enriching-dreams.webp" alt="DreamLog organizing dream narrations locally"></a>
+      <a href="docs/images/03-enriching-dreams.png"><img src="docs/images/03-enriching-dreams.png" alt="DreamLog organizing dream narrations locally"></a>
     </td>
     <td width="25%" valign="top">
       <p align="center"><strong>Reviewing a dream</strong></p>
-      <a href="docs/images/04-enriched-dream.webp"><img src="docs/images/04-enriched-dream.webp" alt="A processed dream in DreamLog"></a>
+      <a href="docs/images/04-enriched-dream.png"><img src="docs/images/04-enriched-dream.png" alt="A processed dream in DreamLog"></a>
     </td>
   </tr>
 </table>

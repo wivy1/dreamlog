@@ -8,7 +8,7 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
-DreamLog is an open-source Android app designed to improve dream recall by allowing your to narrate your dreams without requiring you to sit up, look at a screen, or type. In the morning, all your dreams are transcribed and organized.
+DreamLog is an open-source Android app designed to improve dream recall by enabling you to narrate your dreams without requiring you to sit up, look at a screen, or type. In the morning, all your dreams are transcribed and organized.
 
 ## How it works
 
@@ -17,7 +17,7 @@ DreamLog is an open-source Android app designed to improve dream recall by allow
    **Stop every other microphone/listening app (e.g. SnoreLab) before starting a DreamLog night.**
 
 2. When you are ready to sleep, open DreamLog and tap **Start night**. The app checks microphone access and notification volume before it enters the waiting state.
-3. When you wake, say **"DreamLog"** or **"Hey DreamLog"**, wait for the cue, then speak naturally. You do not need to narrate your dream(s) in perfect chronological order: you can make reference to "the first dream," "the next dream," or "the dream after that"—whatever comes to your mind.
+3. When you wake, say **"DreamLog"** or **"Hey DreamLog"**, wait for the cue, then speak naturally. You do not need to narrate your dream(s) in perfect chronological order: you can make reference to "the first dream," "the next dream," or "the dream after that" - whatever comes to your mind.
 4. When you are finished narrating, simply stop speaking and go back to sleep. DreamLog stops transcribing after 10 seconds of silence and returns to the waiting state.
 5. In the morning, tap **End Night**. DreamLog will complete transcription. Then tap **Enrich**, and DreamLog will organize your dream narration into distinct dreams.
 6. Open any completed night to review it. One or many dreams can be exported through Android's share/save surfaces as **TXT**, **JSON**, or **CSV**.

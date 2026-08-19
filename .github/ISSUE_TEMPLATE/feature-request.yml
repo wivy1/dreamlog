@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest an improvement to DreamLog
+title: "feature: "
+labels: []
+assignees: []
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What dream-logging problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful version of the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or other approaches.
+    validations:
+      required: false

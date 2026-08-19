@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a reproducible DreamLog problem
+title: "bug: "
+labels: []
+assignees: []
+body:
+  - type: input
+    id: version
+    attributes:
+      label: DreamLog version
+      placeholder: v1.0
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Device and Android version
+      placeholder: Pixel 8 Pro, Android 17
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open DreamLog
+        2. Tap ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I reproduced this with other microphone or listening apps stopped.
+          required: false

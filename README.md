@@ -1,64 +1,71 @@
+<h1 align="center"><img src="docs/images/dreamlog-mark.svg" width="70" alt="DreamLog logo"> DreamLog</h1>
+
+<p align="center"><strong>Hands-free Android dream journal for screen-off dream capture, private offline transcription, and on-device organization.</strong></p>
+
 <p align="center">
-  <img src="app/src/main/res/drawable-nodpi/m01_launcher_art.png" width="260" alt="DreamLog logo">
+  <a href="https://github.com/wivy1/dreamlog/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/wivy1/dreamlog?display_name=tag&sort=semver"></a>
+  <img alt="Android 12 or newer" src="https://img.shields.io/badge/Android-12%2B-3DDC84?logo=android&logoColor=white">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
-<h1 align="center">DreamLog</h1>
+DreamLog is an open-source Android dream journal designed to improve dream recall without requiring you to sit up, look at a screen, or type. Whenever you wake from a dream, keep your eyes closed and say **"DreamLog"** or **"Hey DreamLog"**. A short activation sound will play, then you can narrate what you remember. In the morning, all your dreams will be transcribed and organized.
 
-<p align="center">Hands-free, screen-off dream dictation and fully local transcription for Android.</p>
+It is built for lucid dreamers, dream diary users, and anyone who wants to remember more dreams while staying as close to sleep as possible.
 
-DreamLog is designed to improve dream recall without making you sit up, look at
-a screen, or type. After starting a night, keep your eyes closed and say
-**“DreamLog”** or **“Hey DreamLog”** whenever you wake. A short cue confirms the
-wakeword, then you can narrate what you remember without touching the phone.
+## Features
+
+- Hands-free capture using the built-in **"DreamLog"** and **"Hey DreamLog"** wake words
+- Screen-off overnight listening so you can keep your eyes closed
+- Offline speech-to-text and optional on-device dream organization
+- Private local storage: dream audio and text are not uploaded
+- Source-linked review that preserves the raw transcript separately
 
 ## How it works
 
-1. Before sleep, open DreamLog, complete the one-time model setup, and tap
-   **Start night**. The app checks microphone access, wakeword and transcription
-   models, storage, recovery state, and other required conditions before it
-   enters its ready state.
-2. When you remember a dream, say **“DreamLog”** or **“Hey DreamLog”**, wait for
-   the cue, and speak naturally. You do not need to tell the story in perfect
-   chronological order: work backward from the part you remember and return to
-   earlier details during the same narration.
-3. When you are finished, simply stop speaking and go back to sleep. DreamLog
-   ends that recording after its silence boundary and resumes listening for the
-   next wakeword—there is no spoken stop command and nothing to tap.
-4. If you have another dream later, say a wakeword and narrate again. Each
-   wake-triggered recollection remains isolated from the others.
-5. In the morning, tap **End night**. DreamLog transcribes the recordings and
-   uses a local enrichment model to organize source-linked dream entries, apply
-   conservative casing and punctuation, and place explicit returns to earlier
-   details in the relevant part of that narration. The raw transcription is
-   preserved separately.
+1. Before your first sleep, open DreamLog and complete the one-time model setup.
+
+   **Stop SnoreLab and every other microphone/listening app before starting a DreamLog night.**
+
+2. When you are ready to sleep, open DreamLog and tap **Start night**. The app checks microphone access and notification volume before it enters the waiting state.
+3. When you wake, say **"DreamLog"** or **"Hey DreamLog"**, wait for the cue, then speak naturally. You do not need to narrate your dream(s) in perfect chronological order: you can make reference to "the first dream," "the next dream," or "the dream after that"—whatever comes to your mind.
+4. When you are finished narrating, simply stop speaking and go back to sleep. DreamLog stops transcribing after 10 seconds of silence and returns to the waiting state.
+5. In the morning, tap **End Night**. DreamLog will complete transcription. Then tap **Enrich**, and DreamLog will organize your dream narration into distinct dreams.
+6. Open any completed night to review it. One or many dreams can be exported through Android's share/save surfaces as **TXT**, **JSON**, or **CSV**.
 
 The included wakeword models work without voice training or in-app retraining.
 
 ## Private and local
 
-- Captured audio, transcripts, and enriched dreams stay in the app's private
-  storage. Dream content is never uploaded.
-- Transcription and enrichment run on the phone. Network access is used only
-  for explicit, verified model downloads.
-- One or many dreams can be exported through Android's share/save surfaces as
-  **TXT**, **JSON**, or **CSV**.
-- Stop SnoreLab and every other microphone/listening app before starting a
-  DreamLog night. Android may expose a competing recorder warning, but DreamLog
-  cannot identify or stop every other app that is using the microphone.
+Dream audio, raw transcripts, and organized dreams stay in DreamLog's private local storage. Transcription and optional enrichment run on the phone. Network access is used only for explicit model downloads, and DreamLog never uploads dream content.
 
-## Requirements and limits
+## Screenshots
 
-The v1.0 APK is arm64-only, requires Android 12 or newer (API 31+), uses en-US,
-and has been validated on a Pixel 8 Pro. Other arm64 devices are not yet a
-tested compatibility matrix. First-time setup downloads an offline
-transcription model of about 75 MB and an optional enrichment model of about
-2.66 GB. Morning enrichment runs while DreamLog remains open, and Android may
-still interrupt long-running app work.
+<table>
+  <tr>
+    <td width="25%" valign="top">
+      <p align="center"><strong>Ready to start</strong></p>
+      <a href="docs/images/01-ready-to-start.webp"><img src="docs/images/01-ready-to-start.webp" alt="DreamLog ready to start with dream history"></a>
+    </td>
+    <td width="25%" valign="top">
+      <p align="center"><strong>Local models</strong></p>
+      <a href="docs/images/02-local-models.webp"><img src="docs/images/02-local-models.webp" alt="DreamLog local transcription and enrichment model setup"></a>
+    </td>
+    <td width="25%" valign="top">
+      <p align="center"><strong>Enriching</strong></p>
+      <a href="docs/images/03-enriching-dreams.webp"><img src="docs/images/03-enriching-dreams.webp" alt="DreamLog organizing dream narrations locally"></a>
+    </td>
+    <td width="25%" valign="top">
+      <p align="center"><strong>Enriched dream</strong></p>
+      <a href="docs/images/04-enriched-dream.webp"><img src="docs/images/04-enriched-dream.webp" alt="A processed dream in DreamLog"></a>
+    </td>
+  </tr>
+</table>
 
-Download the signed APK from the
-[latest GitHub release](https://github.com/wivy1/dreamlog/releases/latest).
-Android cannot update a private/debug build with this separately signed public
-APK; export anything you need before removing an older debug installation.
+## Requirements
+
+Requires Android 12 or newer. First-time setup downloads an offline transcription model of about 75 MB and an optional enrichment model of about 2.66 GB.
+
+[Download the signed APK from the latest GitHub release.](https://github.com/wivy1/dreamlog/releases/latest)
 
 ## Build from source
 
@@ -68,11 +75,12 @@ Install Java 17 and an Android SDK containing API 37, then run:
 .\gradlew.bat :app:assembleDebug
 ```
 
-Release signing credentials are intentionally excluded from Git. Device
-integration tests use the isolated `deviceTest` package; do not run
-`connectedDebugAndroidTest` against an installation containing real data.
+Release signing credentials are intentionally excluded from Git. Device integration tests use the isolated `deviceTest` package; do not run `connectedDebugAndroidTest` against an installation containing real data.
 
-Third-party runtimes, models, assets, licenses, and exact artifact provenance
-are documented in [app/THIRD_PARTY_NOTICES.md](app/THIRD_PARTY_NOTICES.md).
-DreamLog's original source and artwork currently have no separate public
-license grant; third-party components retain their respective licenses.
+Bug reports and focused pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Third-party runtimes, models, assets, licenses, and exact artifact provenance are documented in [app/THIRD_PARTY_NOTICES.md](app/THIRD_PARTY_NOTICES.md).
+
+## License
+
+MIT.

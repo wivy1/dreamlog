@@ -1,6 +1,6 @@
 <h1 align="center"><img src="docs/images/dreamlog-mark.svg" width="70" alt="DreamLog logo"> DreamLog</h1>
 
-<p align="center"><strong>Hands-free Android dream journal for screen-off dream capture, private offline transcription, and on-device organization.</strong></p>
+<p align="center"><strong>Hands-free, screen-off dream capture with local transcription on Android.</strong></p>
 
 <p align="center">
   <a href="https://github.com/wivy1/dreamlog/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/wivy1/dreamlog?display_name=tag&sort=semver"></a>
@@ -8,31 +8,19 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
-DreamLog is an open-source Android dream journal designed to improve dream recall without requiring you to sit up, look at a screen, or type. Whenever you wake from a dream, keep your eyes closed and say **"DreamLog"** or **"Hey DreamLog"**. A short activation sound will play, then you can narrate what you remember. In the morning, all your dreams will be transcribed and organized.
-
-It is built for lucid dreamers, dream diary users, and anyone who wants to remember more dreams while staying as close to sleep as possible.
-
-## Features
-
-- Hands-free capture using the built-in **"DreamLog"** and **"Hey DreamLog"** wake words
-- Screen-off overnight listening so you can keep your eyes closed
-- Offline speech-to-text and optional on-device dream organization
-- Private local storage: dream audio and text are not uploaded
-- Source-linked review that preserves the raw transcript separately
+DreamLog is an open-source Android app designed to improve dream recall by allowing your to narrate your dreams without requiring you to sit up, look at a screen, or type. Whenever you wake from a dream, keep your eyes closed and say **"DreamLog"** or **"Hey DreamLog"**. A short activation sound will play, then you can narrate what you remember. In the morning, all your dreams will be transcribed and organized.
 
 ## How it works
 
 1. Before your first sleep, open DreamLog and complete the one-time model setup.
 
-   **Stop SnoreLab and every other microphone/listening app before starting a DreamLog night.**
+   **Stop every other microphone/listening app (e.g. SnoreLab) before starting a DreamLog night.**
 
 2. When you are ready to sleep, open DreamLog and tap **Start night**. The app checks microphone access and notification volume before it enters the waiting state.
 3. When you wake, say **"DreamLog"** or **"Hey DreamLog"**, wait for the cue, then speak naturally. You do not need to narrate your dream(s) in perfect chronological order: you can make reference to "the first dream," "the next dream," or "the dream after that"—whatever comes to your mind.
 4. When you are finished narrating, simply stop speaking and go back to sleep. DreamLog stops transcribing after 10 seconds of silence and returns to the waiting state.
 5. In the morning, tap **End Night**. DreamLog will complete transcription. Then tap **Enrich**, and DreamLog will organize your dream narration into distinct dreams.
 6. Open any completed night to review it. One or many dreams can be exported through Android's share/save surfaces as **TXT**, **JSON**, or **CSV**.
-
-The included wakeword models work without voice training or in-app retraining.
 
 ## Private and local
 
@@ -47,15 +35,15 @@ Dream audio, raw transcripts, and organized dreams stay in DreamLog's private lo
       <a href="docs/images/01-ready-to-start.webp"><img src="docs/images/01-ready-to-start.webp" alt="DreamLog ready to start with dream history"></a>
     </td>
     <td width="25%" valign="top">
-      <p align="center"><strong>Local models</strong></p>
+      <p align="center"><strong>Local model setup</strong></p>
       <a href="docs/images/02-local-models.webp"><img src="docs/images/02-local-models.webp" alt="DreamLog local transcription and enrichment model setup"></a>
     </td>
     <td width="25%" valign="top">
-      <p align="center"><strong>Enriching</strong></p>
+      <p align="center"><strong>Enriching a dream</strong></p>
       <a href="docs/images/03-enriching-dreams.webp"><img src="docs/images/03-enriching-dreams.webp" alt="DreamLog organizing dream narrations locally"></a>
     </td>
     <td width="25%" valign="top">
-      <p align="center"><strong>Enriched dream</strong></p>
+      <p align="center"><strong>Reviewing a dream</strong></p>
       <a href="docs/images/04-enriched-dream.webp"><img src="docs/images/04-enriched-dream.webp" alt="A processed dream in DreamLog"></a>
     </td>
   </tr>

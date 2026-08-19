@@ -8,7 +8,7 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
-DreamLog is an open-source Android app designed to improve dream recall by enabling you to narrate your dreams without requiring you to sit up, look at a screen, or type. In the morning, all your dreams are transcribed and organized.
+DreamLog is an open-source Android app designed to improve dream recall by allowing you to narrate your dreams without sitting up, looking at a screen, or typing. In the morning, all your spoken dreams are transcribed and organized.
 
 ## How it works
 

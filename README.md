@@ -22,10 +22,6 @@ DreamLog is an open-source Android app designed to improve dream recall by allow
 5. In the morning, tap **End Night**. DreamLog will complete transcription. Then tap **Enrich**, and DreamLog will organize your dream narration into distinct dreams.
 6. Open any completed night to review it. One or many dreams can be exported through Android's share/save surfaces as **TXT**, **JSON**, or **CSV**.
 
-## Private and local
-
-Dream audio, raw transcripts, and organized dreams stay in DreamLog's private local storage. Transcription and optional enrichment run on the phone. Network access is used only for explicit model downloads, and DreamLog never uploads dream content.
-
 ## Screenshots
 
 <table>
@@ -48,6 +44,10 @@ Dream audio, raw transcripts, and organized dreams stay in DreamLog's private lo
     </td>
   </tr>
 </table>
+
+## Private and local
+
+Dream audio, raw transcripts, and organized dreams stay in DreamLog's private local storage. Transcription and optional enrichment run on the phone. Network access is used only for explicit model downloads, and DreamLog never uploads dream content.
 
 ## Requirements
 

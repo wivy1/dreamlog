@@ -1,7 +1,7 @@
 name: install lossless screenshots
 
 on:
-  push:
+  pull_request:
     branches:
       - main
 
@@ -10,13 +10,16 @@ permissions:
 
 jobs:
   install:
-    if: github.actor != 'github-actions[bot]'
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
-      - name: check out repository
+      - name: check out pull request branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
 
       - name: restore full-resolution png screenshots
         shell: bash
@@ -131,6 +134,8 @@ jobs:
 
       - name: commit and push screenshots
         shell: bash
+        env:
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -138,4 +143,4 @@ jobs:
           git add -A
           git diff --cached --stat
           git commit -m "use lossless png screenshots"
-          git push origin HEAD:main
+          git push origin "HEAD:${HEAD_BRANCH}"

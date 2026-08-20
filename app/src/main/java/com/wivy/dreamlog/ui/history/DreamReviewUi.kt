@@ -146,8 +146,8 @@ private fun DreamCard(
                     )
                 }
             }
-            if (dream.dream.isUncertain || dream.dream.kind == DreamKind.FRAGMENT) {
-                SupportingDreamText("Uncertain fragment", warning = true)
+            dreamReviewStatusText(dream)?.let { status ->
+                SupportingDreamText(status, warning = true)
             }
             if (mediaPlaybackActiveAtWake) {
                 SupportingDreamText(POSSIBLE_MEDIA_FALSE_WAKE_MESSAGE, warning = true)
@@ -187,6 +187,13 @@ internal fun dreamDisplayTitle(dream: DreamRecord, index: Int): String =
         } else {
             "Dream ${index + 1}"
         }
+
+internal fun dreamReviewStatusText(dream: DreamRecord): String? = when {
+    dream.dream.kind == DreamKind.FRAGMENT && dream.dream.isUncertain -> "Uncertain fragment"
+    dream.dream.kind == DreamKind.FRAGMENT -> "Fragment"
+    dream.dream.isUncertain -> "Some details uncertain"
+    else -> null
+}
 
 internal fun dreamDraftHasChanges(
     dream: DreamRecord,
@@ -601,8 +608,8 @@ private fun DreamEditCard(
                     )
                 }
             }
-            if (dream.dream.isUncertain || dream.dream.kind == DreamKind.FRAGMENT) {
-                SupportingDreamText("Uncertain fragment", warning = true)
+            dreamReviewStatusText(dream)?.let { status ->
+                SupportingDreamText(status, warning = true)
             }
             if (narrationDateTimes.isNotEmpty()) {
                 SupportingDreamText("Narrated ${narrationDateTimes.joinToString()}")
@@ -806,11 +813,17 @@ private fun CaptureSessionEntity.preRollDurationMillis(): Long {
     }.getOrDefault(0L)
 }
 
-internal fun canReprocessNight(record: NightRecord): Boolean {
-    return reprocessNightDataUnavailableReason(record) == null
+internal fun canReprocessNight(
+    record: NightRecord,
+    requiresRetainedAudio: Boolean = true,
+): Boolean {
+    return reprocessNightDataUnavailableReason(record, requiresRetainedAudio) == null
 }
 
-internal fun reprocessNightDataUnavailableReason(record: NightRecord): String? {
+internal fun reprocessNightDataUnavailableReason(
+    record: NightRecord,
+    requiresRetainedAudio: Boolean = true,
+): String? {
     if (record.hasProtectedDreamChanges) {
         return "Reprocessing is disabled because an owner edit or deletion must not be overwritten."
     }
@@ -824,7 +837,10 @@ internal fun reprocessNightDataUnavailableReason(record: NightRecord): String? {
     ) {
         return "End this night before reprocessing it."
     }
-    if (record.sessions.any { it.audioState != AudioEvidenceState.RETAINED }) {
+    if (
+        requiresRetainedAudio &&
+        record.sessions.any { it.audioState != AudioEvidenceState.RETAINED }
+    ) {
         return "Every wakeword session needs retained raw audio for reprocessing."
     }
     if (record.sessions.any { it.finalizedAtEpochMillis == null }) {
@@ -847,6 +863,7 @@ fun ManageNightDataCard(
     record: NightRecord,
     blocked: Boolean,
     reprocessUnavailableReason: String?,
+    reprocessRequiresTranscription: Boolean,
     reprocessRunning: Boolean,
     reprocessMessage: String?,
     onReprocessNight: () -> Unit,
@@ -858,7 +875,10 @@ fun ManageNightDataCard(
     }
     var actionMessage by remember(record.night.nightId) { mutableStateOf<String?>(null) }
     val retainedAudio = record.sessions.any { it.audioState == AudioEvidenceState.RETAINED }
-    val dataUnavailableReason = reprocessNightDataUnavailableReason(record)
+    val dataUnavailableReason = reprocessNightDataUnavailableReason(
+        record = record,
+        requiresRetainedAudio = reprocessRequiresTranscription,
+    )
     val effectiveGlobalReason = reprocessUnavailableReason ?: if (blocked) {
         "Wait for the current capture, local processing, or archive operation to finish."
     } else {
@@ -877,9 +897,17 @@ fun ManageNightDataCard(
         ) {
             Text(
                 if (reprocessRunning) {
-                    "Reprocessing this night…"
+                    if (reprocessRequiresTranscription) {
+                        "Reprocessing this night…"
+                    } else {
+                        "Regrouping this night…"
+                    }
                 } else {
-                    "Reprocess with latest models"
+                    if (reprocessRequiresTranscription) {
+                        "Reprocess with latest models"
+                    } else {
+                        "Regroup with latest model"
+                    }
                 },
             )
         }
@@ -928,7 +956,8 @@ fun ManageNightDataCard(
             title = {
                 Text(
                     when {
-                        reprocess -> "Reprocess this night?"
+                        reprocess && reprocessRequiresTranscription -> "Reprocess this night?"
+                        reprocess -> "Regroup this night?"
                         rawAudioOnly -> "Delete recordings only?"
                         else -> "Delete this night from History?"
                     },
@@ -936,12 +965,17 @@ fun ManageNightDataCard(
             },
             text = {
                 Text(
-                    if (reprocess) {
+                    if (reprocess && reprocessRequiresTranscription) {
                         "DreamLog will re-transcribe every retained wakeword session with the " +
                             "current high-quality speech model, then replace this night's " +
                             "generated dream grouping with the current enrichment model. Raw " +
                             "audio remains. Existing generated text will be replaced and this " +
                             "can't be undone."
+                    } else if (reprocess) {
+                        "This night's saved transcript already uses the current speech model. " +
+                            "DreamLog will keep that transcript and atomically replace only the " +
+                            "generated dream grouping with the latest enrichment model. Existing " +
+                            "generated dreams will be replaced and this can't be undone."
                     } else if (rawAudioOnly) {
                         "All retained raw audio for this night will be permanently deleted. " +
                             "The night, dreams, raw transcripts, and source text will remain in " +
@@ -959,7 +993,11 @@ fun ManageNightDataCard(
                         confirmation = null
                         actionMessage = null
                         if (reprocess) {
-                            actionMessage = "Reprocessing started. Keep DreamLog open."
+                            actionMessage = if (reprocessRequiresTranscription) {
+                                "Reprocessing started. Keep DreamLog open."
+                            } else {
+                                "Dream regrouping started. Keep DreamLog open."
+                            }
                             onReprocessNight()
                         } else {
                             val completion: (String?) -> Unit = { error ->
@@ -978,7 +1016,13 @@ fun ManageNightDataCard(
                     },
                     enabled = !blocked && (!reprocess || !reprocessRunning),
                 ) {
-                    Text(if (reprocess) "Reprocess" else "Delete")
+                    Text(
+                        when {
+                            reprocess && reprocessRequiresTranscription -> "Reprocess"
+                            reprocess -> "Regroup"
+                            else -> "Delete"
+                        },
+                    )
                 }
             },
             dismissButton = {

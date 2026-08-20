@@ -29,7 +29,7 @@ import org.junit.Test
 
 class NightHistoryUiTest {
     @Test
-    fun nonretryableEnrichmentFailureHidesMarkerAndRetryInstruction() {
+    fun legacyOversizeFailureHidesMarkerAndShowsRetryInstructionAfterUpgrade() {
         val text = enrichmentProcessingText(
             ProcessingState.FAILED,
             "The whole-night transcript is too large. " +
@@ -38,7 +38,7 @@ class NightHistoryUiTest {
 
         assertTrue(text.contains("whole-night transcript"))
         assertFalse(text.contains("[code="))
-        assertFalse(text.contains("retry from this night"))
+        assertTrue(text.contains("retry from this night"))
     }
 
     @Test
@@ -295,6 +295,32 @@ class NightHistoryUiTest {
     }
 
     @Test
+    fun dreamReviewStatusDistinguishesUncertainDreamsFromFragments() {
+        val complete = dreamRecord(currentTitle = null, generatedTitle = null)
+        val uncertainDream = dreamRecord(
+            currentTitle = null,
+            generatedTitle = null,
+            isUncertain = true,
+        )
+        val fragment = dreamRecord(
+            currentTitle = null,
+            generatedTitle = null,
+            kind = DreamKind.FRAGMENT,
+        )
+        val uncertainFragment = dreamRecord(
+            currentTitle = null,
+            generatedTitle = null,
+            kind = DreamKind.FRAGMENT,
+            isUncertain = true,
+        )
+
+        assertNull(dreamReviewStatusText(complete))
+        assertEquals("Some details uncertain", dreamReviewStatusText(uncertainDream))
+        assertEquals("Fragment", dreamReviewStatusText(fragment))
+        assertEquals("Uncertain fragment", dreamReviewStatusText(uncertainFragment))
+    }
+
+    @Test
     fun dreamDraftChangesIgnoreOptionalTitleWhitespaceButDetectContentEdits() {
         val untitled = dreamRecord(currentTitle = null, generatedTitle = "Generated title")
         val titled = dreamRecord(currentTitle = "Owner title", generatedTitle = "Generated title")
@@ -369,6 +395,23 @@ class NightHistoryUiTest {
                     },
                 ),
             ).orEmpty().contains("retained raw audio"),
+        )
+        val currentTranscriptWithoutAudio = eligible.copy(
+            sessions = eligible.sessions.map {
+                it.copy(audioState = AudioEvidenceState.DELETED)
+            },
+        )
+        assertTrue(
+            canReprocessNight(
+                record = currentTranscriptWithoutAudio,
+                requiresRetainedAudio = false,
+            ),
+        )
+        assertNull(
+            reprocessNightDataUnavailableReason(
+                record = currentTranscriptWithoutAudio,
+                requiresRetainedAudio = false,
+            ),
         )
         assertFalse(canReprocessNight(eligible.copy(transcripts = emptyList())))
         assertTrue(
@@ -608,6 +651,7 @@ class NightHistoryUiTest {
         currentTitle: String?,
         generatedTitle: String?,
         kind: String = DreamKind.DREAM,
+        isUncertain: Boolean = false,
     ) = DreamRecord(
         dream = DreamEntity(
             dreamId = "dream-1",
@@ -615,7 +659,7 @@ class NightHistoryUiTest {
             runId = "run-1",
             dreamOrder = 0,
             kind = kind,
-            isUncertain = false,
+            isUncertain = isUncertain,
             generatedTitle = generatedTitle,
             generatedText = "Generated text",
             currentTitle = currentTitle,

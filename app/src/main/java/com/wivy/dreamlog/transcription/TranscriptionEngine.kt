@@ -7,6 +7,16 @@ interface TranscriptionEngine : AutoCloseable {
     val metadata: TranscriptionEngineMetadata
 
     /**
+     * Optional hard ceiling for each complete-waveform recognition call.
+     *
+     * The coordinator uses this only to collect source-relative non-speech boundary hints for a
+     * longer input. Engines remain responsible for enforcing their own ceiling even when no
+     * analyzer is available or boundary analysis fails.
+     */
+    val maximumDecodeSampleCount: Long?
+        get() = null
+
+    /**
      * Transcribes one retained session without modifying its source audio.
      *
      * Implementations must keep every segment boundary relative to [audioFile], including when
@@ -41,6 +51,7 @@ data class TranscriptionInput(
     val contentStartSample: Long = acousticRange.startSample,
     val triggeringWakePhrase: TriggeringWakePhrase? = null,
     val openingRecoveryFloorSample: Long? = null,
+    val observedNonSpeechRanges: List<SessionNonSpeechRange> = emptyList(),
 ) {
     init {
         require(contentStartSample >= acousticRange.startSample) {
@@ -61,6 +72,13 @@ data class TranscriptionInput(
                 }
             }
         }
+        require(observedNonSpeechRanges.zipWithNext().all { (left, right) ->
+            left.endSampleExclusive <= right.startSample
+        }) { "Observed non-speech ranges must be ordered and non-overlapping." }
+        require(observedNonSpeechRanges.all { range ->
+            range.startSample >= acousticRange.startSample &&
+                acousticRange.endSampleExclusive?.let { range.endSampleExclusive <= it } != false
+        }) { "Observed non-speech is outside the acoustic range." }
     }
 }
 

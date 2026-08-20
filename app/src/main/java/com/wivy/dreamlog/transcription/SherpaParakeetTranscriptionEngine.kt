@@ -5,6 +5,7 @@ import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
+import com.wivy.dreamlog.history.SessionTranscriptEntity
 import com.wivy.dreamlog.transcription.model.InstalledLocalAsrModel
 import com.wivy.dreamlog.transcription.model.LocalAsrModelManifest
 import java.io.File
@@ -16,6 +17,8 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
     override val metadata: TranscriptionEngineMetadata,
 ) : TranscriptionEngine {
     private val closed = AtomicBoolean(false)
+
+    override val maximumDecodeSampleCount: Long = MAX_DECODE_SAMPLE_COUNT.toLong()
 
     constructor(model: InstalledLocalAsrModel) : this(
         recognizer = NativeSherpaRecognizer(model),
@@ -31,7 +34,7 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
         require(source.sampleRateHz == SAMPLE_RATE_HZ) {
             "Session audio must use a 16 kHz sample rate."
         }
-        val primary = transcribeCompleteWaveform(source, input)
+        val primary = transcribeSerially(source, input)
         return recoverMissingOpening(source, input, primary)
     }
 
@@ -50,20 +53,32 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
             )
         }
 
-        private const val SAMPLE_RATE_HZ = 16_000
+        internal const val SAMPLE_RATE_HZ = 16_000
+        internal const val MAX_DECODE_SAMPLE_COUNT = SAMPLE_RATE_HZ * 30
         private const val FEATURE_DIMENSION = 80
         private const val CPU_THREAD_COUNT = 2
 
         internal fun metadataFor(model: InstalledLocalAsrModel) = TranscriptionEngineMetadata(
-            localeTag = "en-US",
-            engineId = "sherpa-onnx-offline-transducer",
-            engineVersion = "11",
-            runtimeId = "sherpa-onnx",
+            localeTag = CURRENT_LOCALE_TAG,
+            engineId = CURRENT_ENGINE_ID,
+            engineVersion = CURRENT_ENGINE_VERSION,
+            runtimeId = CURRENT_RUNTIME_ID,
             runtimeVersion = SHERPA_RUNTIME_VERSION,
             modelId = LocalAsrModelManifest.ID,
             modelVersion = model.revision,
             modelSha256 = model.modelSha256,
         )
+
+        /** True when a saved transcript already came from this exact pinned speech pipeline. */
+        internal fun hasCurrentProvenance(transcript: SessionTranscriptEntity): Boolean =
+            transcript.localeTag == CURRENT_LOCALE_TAG &&
+                transcript.engineId == CURRENT_ENGINE_ID &&
+                transcript.engineVersion == CURRENT_ENGINE_VERSION &&
+                transcript.runtimeId == CURRENT_RUNTIME_ID &&
+                transcript.runtimeVersion == SHERPA_RUNTIME_VERSION &&
+                transcript.modelId == LocalAsrModelManifest.ID &&
+                transcript.modelVersion == LocalAsrModelManifest.REVISION &&
+                transcript.modelSha256.equals(LocalAsrModelManifest.MODEL_SHA256, ignoreCase = true)
 
         internal fun recognizerConfig(model: InstalledLocalAsrModel) = OfflineRecognizerConfig(
             featConfig = FeatureConfig(
@@ -88,6 +103,10 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
             blankPenalty = 0f,
         )
 
+        private const val CURRENT_LOCALE_TAG = "en-US"
+        private const val CURRENT_ENGINE_ID = "sherpa-onnx-offline-transducer"
+        private const val CURRENT_ENGINE_VERSION = "12"
+        private const val CURRENT_RUNTIME_ID = "sherpa-onnx"
         private const val SHERPA_RUNTIME_VERSION = "1.13.4"
         private const val MILLIS_PER_SECOND = 1_000L
         private val TEST_METADATA = TranscriptionEngineMetadata(
@@ -102,8 +121,8 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
         )
     }
 
-    /** Decode the complete resolved narration range as one utterance. */
-    private fun transcribeCompleteWaveform(
+    /** Decode one complete stream for short input, or fresh bounded streams serially. */
+    private fun transcribeSerially(
         source: Pcm16WavSource,
         input: TranscriptionInput?,
     ): TranscriptionResult {
@@ -124,26 +143,68 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
             return TranscriptionResult(rawText = "", segments = emptyList())
         }
 
+        val decodeRanges = SerialOfflineDecodePlanner.plan(
+            recognitionStartSample = recognitionStartSample,
+            recognitionEndSample = recognitionEndSample,
+            observedNonSpeechRanges = input?.observedNonSpeechRanges.orEmpty(),
+            maxDecodeSampleCount = MAX_DECODE_SAMPLE_COUNT.toLong(),
+            sampleRateHz = source.sampleRateHz,
+        )
+        val results = decodeRanges.mapIndexed { index, range ->
+            val windowContentStart = contentStartSample.coerceIn(
+                range.startSample,
+                range.endSampleExclusive,
+            )
+            decodeCompleteWindow(
+                source = source,
+                recognitionStartSample = range.startSample,
+                recognitionEndSample = range.endSampleExclusive,
+                contentStartSample = windowContentStart,
+                triggeringWakePhrase = input?.triggeringWakePhrase.takeIf { index == 0 },
+            )
+        }
+        return TranscriptionResult(
+            rawText = results.asSequence()
+                .map { it.rawText.trim() }
+                .filter { it.isNotEmpty() }
+                .joinToString(separator = " "),
+            segments = results.flatMap { it.segments },
+        )
+    }
+
+    /** One call means one fresh sherpa offline stream and one bounded waveform allocation. */
+    private fun decodeCompleteWindow(
+        source: Pcm16WavSource,
+        recognitionStartSample: Long,
+        recognitionEndSample: Long,
+        contentStartSample: Long,
+        triggeringWakePhrase: TriggeringWakePhrase? = null,
+    ): TranscriptionResult {
+        check(recognitionEndSample - recognitionStartSample <= MAX_DECODE_SAMPLE_COUNT) {
+            "A local transcription decode exceeded its fixed waveform limit."
+        }
         val sourceStartMillis = samplesToMillis(recognitionStartSample, source.sampleRateHz)
         val sourceEndMillis = samplesToMillis(recognitionEndSample, source.sampleRateHz)
         check(sourceEndMillis > sourceStartMillis) {
             "The resolved narration is too short to map to source time."
         }
         val result = SherpaTokenSegmenter.segment(
-            // Keep the large PCM FloatArray inside a narrow call frame. It becomes unreachable
-            // as soon as native decoding returns, before timestamp segmentation and before the
-            // next session is claimed. The source audio is not shortened or arbitrarily cut.
-            recognition = recognizeResolvedWaveform(
-                source = source,
-                recognitionStartSample = recognitionStartSample,
-                recognitionEndSample = recognitionEndSample,
+            recognition = recognizer.recognizeCompleteWaveform(
+                samples = source.readCompleteFloatSamples(
+                    recognitionRange = Pcm16WavSource.RecognitionRange(
+                        startSample = recognitionStartSample,
+                        endSampleExclusive = recognitionEndSample,
+                    ),
+                    maxSampleCount = MAX_DECODE_SAMPLE_COUNT,
+                ),
+                sampleRateHz = source.sampleRateHz,
             ),
             sourceDurationMillis = sourceEndMillis - sourceStartMillis,
             contentStartMillis = samplesToMillis(
                 contentStartSample - recognitionStartSample,
                 source.sampleRateHz,
             ),
-            triggeringWakePhrase = input?.triggeringWakePhrase,
+            triggeringWakePhrase = triggeringWakePhrase,
         )
         return result.copy(
             segments = result.segments.map { segment ->
@@ -156,28 +217,13 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
         )
     }
 
-    private fun recognizeResolvedWaveform(
-        source: Pcm16WavSource,
-        recognitionStartSample: Long,
-        recognitionEndSample: Long,
-    ): SherpaRecognition = recognizer.recognizeCompleteWaveform(
-        samples = source.readCompleteFloatSamples(
-            recognitionRange = Pcm16WavSource.RecognitionRange(
-                startSample = recognitionStartSample,
-                endSampleExclusive = recognitionEndSample,
-            ),
-            maxSampleCount = Int.MAX_VALUE,
-        ),
-        sampleRateHz = source.sampleRateHz,
-    )
-
     /**
      * Recovers a short opening that a transducer can omit after a long leading pause.
      *
-     * The ordinary whole-session pass remains authoritative. Only when its first narration word
+     * The ordinary serial pass remains authoritative. Only when its first narration word
      * begins well after the acknowledgement cue do we retry from shortly before that word. The
-     * retry replaces the primary result only when it adds a small leading prefix and every primary
-     * word remains an exact suffix, so a changed or speculative body is never accepted.
+     * retry contributes only a small leading prefix when it ends with an exact overlap of the
+     * primary opening; the complete primary body remains unchanged.
      */
     private fun recoverMissingOpening(
         source: Pcm16WavSource,
@@ -208,20 +254,27 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
         )
         if (recoveryStartSample >= firstPrimarySample) return primary
 
+        val recognitionEndSample = input.acousticRange.endSampleExclusive ?: source.sampleCount
+        val recoveryEndSample = minOf(
+            recognitionEndSample,
+            recoveryStartSample + minOf(
+                MAX_DECODE_SAMPLE_COUNT.toLong(),
+                recognitionEndSample - recoveryStartSample,
+            ),
+        )
+        if (recoveryEndSample <= recoveryStartSample) return primary
+
         val recovery = try {
-            transcribeCompleteWaveform(
+            decodeCompleteWindow(
                 source = source,
-                input = TranscriptionInput(
-                    acousticRange = Pcm16WavSource.RecognitionRange(
-                        startSample = recoveryStartSample,
-                        endSampleExclusive = input.acousticRange.endSampleExclusive,
-                    ),
-                ),
+                recognitionStartSample = recoveryStartSample,
+                recognitionEndSample = recoveryEndSample,
+                contentStartSample = recoveryStartSample,
             )
         } catch (_: Exception) {
             return primary
         }
-        return if (recovery.isExactPrefixExtensionOf(primary)) recovery else primary
+        return recovery.mergeExactOpeningPrefixWith(primary) ?: primary
     }
 
     private fun samplesToMillis(sampleCount: Long, sampleRateHz: Int): Long =
@@ -232,18 +285,130 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
 
 }
 
-private fun TranscriptionResult.isExactPrefixExtensionOf(
+/**
+ * Accepts only a small recovered prefix followed by an exact overlap with the primary opening.
+ * The primary body remains byte-for-byte authoritative, so the bounded recovery never needs to
+ * decode or compare the complete long tail and cannot duplicate the overlap.
+ */
+private fun TranscriptionResult.mergeExactOpeningPrefixWith(
     primary: TranscriptionResult,
-): Boolean {
-    val recoveredStart = segments.firstOrNull()?.sourceStartMillis ?: return false
-    val primaryStart = primary.segments.firstOrNull()?.sourceStartMillis ?: return false
-    if (recoveredStart >= primaryStart) return false
+): TranscriptionResult? {
+    val recoveredStart = segments.firstOrNull()?.sourceStartMillis ?: return null
+    val primaryStart = primary.segments.firstOrNull()?.sourceStartMillis ?: return null
+    if (recoveredStart >= primaryStart) return null
     val primaryWords = primary.rawText.canonicalWords()
     val recoveredWords = rawText.canonicalWords()
-    val addedWordCount = recoveredWords.size - primaryWords.size
-    return primaryWords.isNotEmpty() &&
-        addedWordCount in 1..MAX_RECOVERED_OPENING_WORDS &&
-        recoveredWords.takeLast(primaryWords.size) == primaryWords
+    if (primaryWords.isEmpty() || recoveredWords.isEmpty()) return null
+    val overlapWordCount = (minOf(primaryWords.size, recoveredWords.size) downTo 1)
+        .firstOrNull { count ->
+            recoveredWords.takeLast(count) == primaryWords.take(count)
+        } ?: return null
+    val addedWords = recoveredWords.dropLast(overlapWordCount)
+    if (addedWords.size !in 1..MAX_RECOVERED_OPENING_WORDS) return null
+
+    val addedSegments = segments.takeWhile { it.sourceStartMillis < primaryStart }
+        .mapNotNull { segment ->
+            val end = minOf(segment.sourceEndMillis, primaryStart)
+            segment.copy(sourceEndMillis = end).takeIf { end > segment.sourceStartMillis }
+        }
+    if (
+        addedSegments.flatMap { it.text.canonicalWords() } != addedWords ||
+        addedSegments.lastOrNull()?.sourceEndMillis?.let { it > primaryStart } == true
+    ) {
+        return null
+    }
+    return TranscriptionResult(
+        rawText = (addedSegments.joinToString(separator = " ") { it.text } +
+            " " + primary.rawText).trim(),
+        segments = addedSegments + primary.segments,
+    )
+}
+
+internal data class OfflineDecodeRange(
+    val startSample: Long,
+    val endSampleExclusive: Long,
+)
+
+/** Plans contiguous serial streams without dropping or repeating any source sample. */
+internal object SerialOfflineDecodePlanner {
+    fun plan(
+        recognitionStartSample: Long,
+        recognitionEndSample: Long,
+        observedNonSpeechRanges: List<SessionNonSpeechRange>,
+        maxDecodeSampleCount: Long,
+        sampleRateHz: Int,
+    ): List<OfflineDecodeRange> {
+        require(recognitionStartSample >= 0L)
+        require(recognitionEndSample >= recognitionStartSample)
+        require(maxDecodeSampleCount > 0L)
+        require(sampleRateHz > 0)
+        if (recognitionStartSample == recognitionEndSample) return emptyList()
+
+        val minimumPreferredWindow = minOf(
+            sampleRateHz * MIN_PREFERRED_WINDOW_SECONDS.toLong(),
+            maxDecodeSampleCount,
+        )
+        val minimumBoundarySilence =
+            sampleRateHz * MIN_BOUNDARY_SILENCE_MILLIS / MILLIS_PER_SECOND
+        val minimumFinalWindow = minOf(
+            sampleRateHz * MIN_FINAL_WINDOW_MILLIS / MILLIS_PER_SECOND,
+            maxOf(1L, maxDecodeSampleCount / 2L),
+        )
+        val ranges = mutableListOf<OfflineDecodeRange>()
+        var start = recognitionStartSample
+        while (start < recognitionEndSample) {
+            val remaining = recognitionEndSample - start
+            if (remaining <= maxDecodeSampleCount) {
+                ranges += OfflineDecodeRange(start, recognitionEndSample)
+                break
+            }
+
+            val hardEnd = start + maxDecodeSampleCount
+            val latestCut = minOf(hardEnd, recognitionEndSample - minimumFinalWindow)
+            val earliestPreferredCut = minOf(
+                latestCut,
+                start + minimumPreferredWindow,
+            )
+            val observedCut = observedNonSpeechRanges.asSequence()
+                .filter { range -> range.sampleCount >= minimumBoundarySilence }
+                .mapNotNull { range ->
+                    val usableStart = maxOf(range.startSample, earliestPreferredCut)
+                    val usableEnd = minOf(range.endSampleExclusive, latestCut)
+                    if (usableStart >= usableEnd) {
+                        null
+                    } else if (range.endSampleExclusive >= latestCut) {
+                        latestCut
+                    } else {
+                        usableStart + (usableEnd - usableStart) / 2L
+                    }
+                }
+                .maxOrNull()
+            val cut = observedCut ?: if (
+                recognitionEndSample - hardEnd in 1 until minimumFinalWindow
+            ) {
+                // With no usable silence, a balanced final pair avoids an unmappable tiny tail.
+                start + remaining / 2L
+            } else {
+                // The hard cut is the last-resort coverage-preserving fallback for continuous
+                // speech: every sample is still decoded once and the memory ceiling still holds.
+                hardEnd
+            }
+            check(cut > start && cut < recognitionEndSample)
+            ranges += OfflineDecodeRange(start, cut)
+            start = cut
+        }
+        check(ranges.all { it.endSampleExclusive - it.startSample <= maxDecodeSampleCount })
+        check(ranges.first().startSample == recognitionStartSample)
+        check(ranges.last().endSampleExclusive == recognitionEndSample)
+        check(ranges.zipWithNext().all { (left, right) ->
+            left.endSampleExclusive == right.startSample
+        })
+        return ranges
+    }
+
+    private const val MIN_PREFERRED_WINDOW_SECONDS = 5
+    private const val MIN_BOUNDARY_SILENCE_MILLIS = 250L
+    private const val MIN_FINAL_WINDOW_MILLIS = 100L
 }
 
 private fun String.canonicalWords(): List<String> =
@@ -295,4 +460,5 @@ private class NativeSherpaRecognizer(
 private const val MIN_OPENING_GAP_FOR_RECOVERY_MILLIS = 2_000L
 private const val OPENING_RECOVERY_LOOKBACK_MILLIS = 1_500L
 private const val MAX_RECOVERED_OPENING_WORDS = 12
+private const val MILLIS_PER_SECOND = 1_000L
 private val CANONICAL_WORD_PATTERN = Regex("[A-Z0-9']+")

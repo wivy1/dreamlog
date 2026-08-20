@@ -1,11 +1,15 @@
 package com.wivy.dreamlog.transcription
 
+import com.wivy.dreamlog.history.ProcessingState
+import com.wivy.dreamlog.history.SessionTranscriptEntity
 import com.wivy.dreamlog.transcription.model.InstalledLocalAsrModel
+import com.wivy.dreamlog.transcription.model.LocalAsrModelManifest
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.ArrayDeque
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -17,7 +21,7 @@ class SherpaParakeetTranscriptionEngineTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
-    fun productionConfigurationPinsVersionElevenParakeetGreedyDecoder() {
+    fun productionConfigurationPinsVersionTwelveParakeetGreedyDecoder() {
         val model = InstalledLocalAsrModel(
             directory = temporaryFolder.newFolder("model"),
             revision = "model-revision",
@@ -37,9 +41,50 @@ class SherpaParakeetTranscriptionEngineTest {
         assertEquals("greedy_search", config.decodingMethod)
         assertEquals(4, config.maxActivePaths)
         assertEquals(0f, config.blankPenalty)
-        assertEquals("11", metadata.engineVersion)
+        assertEquals("12", metadata.engineVersion)
         assertEquals("model-revision", metadata.modelVersion)
         assertEquals("a".repeat(64), metadata.modelSha256)
+    }
+
+    @Test
+    fun currentProvenanceRecognizesOnlyTheExactPinnedSpeechPipeline() {
+        val model = InstalledLocalAsrModel(
+            directory = temporaryFolder.newFolder("current-model"),
+            revision = LocalAsrModelManifest.REVISION,
+            modelSha256 = LocalAsrModelManifest.MODEL_SHA256,
+            totalModelBytes = 1L,
+        )
+        val metadata = SherpaParakeetTranscriptionEngine.metadataFor(model)
+        val transcript = SessionTranscriptEntity(
+            sessionId = "session-1",
+            nightId = "night-1",
+            state = ProcessingState.COMPLETE,
+            failureDetail = null,
+            rawText = "saved transcript",
+            localeTag = metadata.localeTag,
+            engineId = metadata.engineId,
+            engineVersion = metadata.engineVersion,
+            runtimeId = metadata.runtimeId,
+            runtimeVersion = metadata.runtimeVersion,
+            modelId = metadata.modelId,
+            modelVersion = metadata.modelVersion,
+            modelSha256 = metadata.modelSha256.uppercase(),
+            attemptCount = 1,
+            startedAtEpochMillis = 1L,
+            completedAtEpochMillis = 2L,
+        )
+
+        assertTrue(SherpaParakeetTranscriptionEngine.hasCurrentProvenance(transcript))
+        assertFalse(
+            SherpaParakeetTranscriptionEngine.hasCurrentProvenance(
+                transcript.copy(engineVersion = "11"),
+            ),
+        )
+        assertFalse(
+            SherpaParakeetTranscriptionEngine.hasCurrentProvenance(
+                transcript.copy(modelSha256 = "0".repeat(64)),
+            ),
+        )
     }
 
     @Test
@@ -278,7 +323,7 @@ class SherpaParakeetTranscriptionEngineTest {
     }
 
     @Test
-    fun sendsLongNarrationToOneCompleteRecognitionStream() {
+    fun shortNarrationUsesOneCompleteRecognitionStream() {
         val sourceSamples = ShortArray(40_000)
         val recognizer = RecordingRecognizer(
             recognition = SherpaRecognition(
@@ -306,6 +351,117 @@ class SherpaParakeetTranscriptionEngineTest {
             ),
             result.segments,
         )
+    }
+
+    @Test
+    fun longNarrationUsesObservedSilenceBoundariesAndAbsoluteOffsets() {
+        val sourceSamples = ShortArray(1_040_000)
+        val sourceFile = wav(sourceSamples)
+        val sourceBytes = sourceFile.readBytes()
+        val recognizer = RecordingRecognizer(
+            recognitions = listOf(
+                SherpaRecognition(
+                    text = "DREAM LOG FIRST",
+                    tokens = listOf(" DREAM", " LOG", " FIRST"),
+                    timestampsSeconds = listOf(1f, 1.5f, 2.5f),
+                ),
+                SherpaRecognition(
+                    text = "SECOND",
+                    tokens = listOf(" SECOND"),
+                    timestampsSeconds = listOf(2f),
+                ),
+                SherpaRecognition(
+                    text = "THIRD",
+                    tokens = listOf(" THIRD"),
+                    timestampsSeconds = listOf(1f),
+                ),
+            ),
+        )
+        val engine = SherpaParakeetTranscriptionEngine.forTesting(recognizer)
+
+        val result = engine.transcribe(
+            audioFile = sourceFile,
+            input = TranscriptionInput(
+                acousticRange = Pcm16WavSource.RecognitionRange(0L, 1_040_000L),
+                contentStartSample = 32_000L,
+                triggeringWakePhrase = TriggeringWakePhrase.DREAM_LOG,
+                observedNonSpeechRanges = listOf(
+                    SessionNonSpeechRange(400_000L, 416_000L),
+                    SessionNonSpeechRange(800_000L, 816_000L),
+                ),
+            ),
+        )
+
+        assertEquals(listOf(408_000, 400_000, 232_000), recognizer.calls.map { it.samples.size })
+        assertTrue(
+            recognizer.calls.all {
+                it.samples.size <= SherpaParakeetTranscriptionEngine.MAX_DECODE_SAMPLE_COUNT
+            },
+        )
+        assertEquals("FIRST SECOND THIRD", result.rawText)
+        assertEquals(listOf("FIRST", "SECOND", "THIRD"), result.segments.map { it.text })
+        assertEquals(listOf(2_500L, 27_500L, 51_500L), result.segments.map { it.sourceStartMillis })
+        assertEquals(65_000L, result.segments.last().sourceEndMillis)
+        assertArrayEquals(sourceBytes, sourceFile.readBytes())
+    }
+
+    @Test
+    fun continuousSpeechUsesContiguousHardBoundedFallback() {
+        val ranges = SerialOfflineDecodePlanner.plan(
+            recognitionStartSample = 0L,
+            recognitionEndSample = 640_000L,
+            observedNonSpeechRanges = emptyList(),
+            maxDecodeSampleCount = SherpaParakeetTranscriptionEngine.MAX_DECODE_SAMPLE_COUNT.toLong(),
+            sampleRateHz = 16_000,
+        )
+
+        assertEquals(
+            listOf(
+                OfflineDecodeRange(0L, 480_000L),
+                OfflineDecodeRange(480_000L, 640_000L),
+            ),
+            ranges,
+        )
+    }
+
+    @Test
+    fun openingRecoveryNeverMaterializesTheCompleteLongTail() {
+        val recognizer = RecordingRecognizer(
+            recognitions = listOf(
+                SherpaRecognition(
+                    text = "PRIMARY BODY",
+                    tokens = listOf(" PRIMARY", " BODY"),
+                    timestampsSeconds = listOf(6.7f, 7.0f),
+                ),
+                EMPTY_RECOGNITION,
+                EMPTY_RECOGNITION,
+                SherpaRecognition(
+                    text = "EXTRA PRIMARY",
+                    tokens = listOf(" EXTRA", " PRIMARY"),
+                    timestampsSeconds = listOf(0.35f, 1.5f),
+                ),
+            ),
+        )
+        val engine = SherpaParakeetTranscriptionEngine.forTesting(recognizer)
+
+        val result = engine.transcribe(
+            audioFile = wav(ShortArray(1_200_000)),
+            input = TranscriptionInput(
+                acousticRange = Pcm16WavSource.RecognitionRange(0L, 1_200_000L),
+                contentStartSample = 32_000L,
+                openingRecoveryFloorSample = 64_000L,
+            ),
+        )
+
+        assertEquals(listOf(480_000, 480_000, 240_000, 480_000), recognizer.calls.map { it.samples.size })
+        assertTrue(
+            recognizer.calls.all {
+                it.samples.size <= SherpaParakeetTranscriptionEngine.MAX_DECODE_SAMPLE_COUNT
+            },
+        )
+        assertEquals("EXTRA PRIMARY BODY", result.rawText)
+        assertEquals(listOf("EXTRA", "PRIMARY", "BODY"), result.segments.map { it.text })
+        assertEquals(5_550L, result.segments.first().sourceStartMillis)
     }
 
     @Test
@@ -425,13 +581,14 @@ class SherpaParakeetTranscriptionEngineTest {
             val sampleRateHz: Int,
         )
 
-        private companion object {
-            val EMPTY_RECOGNITION = SherpaRecognition(
-                text = "",
-                tokens = emptyList(),
-                timestampsSeconds = emptyList(),
-            )
-        }
+    }
+
+    private companion object {
+        val EMPTY_RECOGNITION = SherpaRecognition(
+            text = "",
+            tokens = emptyList(),
+            timestampsSeconds = emptyList(),
+        )
     }
 
 }

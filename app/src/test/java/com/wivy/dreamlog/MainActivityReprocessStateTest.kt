@@ -48,6 +48,7 @@ class MainActivityReprocessStateTest {
         listOf(
             NightReprocessPhase.TRANSCRIBING,
             NightReprocessPhase.ENRICHING,
+            NightReprocessPhase.ENRICHING_PRESERVED_TRANSCRIPT,
         ).forEach { phase ->
             val state = reconcileNightReprocessProcessState(
                 savedOwnerProcessInstanceId = "process-a",
@@ -81,6 +82,7 @@ class MainActivityReprocessStateTest {
         listOf(
             NightReprocessPhase.TRANSCRIBING,
             NightReprocessPhase.ENRICHING,
+            NightReprocessPhase.ENRICHING_PRESERVED_TRANSCRIPT,
         ).forEach { phase ->
             assertFalse(
                 canStartAutomaticTranscription(
@@ -112,6 +114,56 @@ class MainActivityReprocessStateTest {
                 enrichmentModelPhase = EnrichmentModelPhase.INSTALLED,
                 enrichmentRuntimePhase = EnrichmentRuntimePhase.IDLE,
             ),
+        )
+    }
+
+    @Test
+    fun currentCompleteTranscriptSkipsRedundantRetranscription() {
+        assertEquals(
+            NightReprocessMode.ENRICHMENT_ONLY,
+            selectNightReprocessMode(
+                hasCompleteEnrichmentSource = true,
+                everyTranscriptUsesCurrentPipeline = true,
+            ),
+        )
+        listOf(
+            false to true,
+            true to false,
+            false to false,
+        ).forEach { (hasCompleteSource, currentPipeline) ->
+            assertEquals(
+                NightReprocessMode.RETRANSCRIBE_THEN_ENRICH,
+                selectNightReprocessMode(
+                    hasCompleteEnrichmentSource = hasCompleteSource,
+                    everyTranscriptUsesCurrentPipeline = currentPipeline,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun enrichmentOnlyReprocessDoesNotRequireTheSpeechModel() {
+        assertNull(
+            nightReprocessGlobalUnavailableReason(
+                captureActive = false,
+                archiveMutationRunning = false,
+                transcriptionModelPhase = TranscriptionModelPhase.ERROR,
+                transcriptionRuntimePhase = TranscriptionRuntimePhase.IDLE,
+                enrichmentModelPhase = EnrichmentModelPhase.INSTALLED,
+                enrichmentRuntimePhase = EnrichmentRuntimePhase.IDLE,
+                requiresTranscriptionModel = false,
+            ),
+        )
+        assertTrue(
+            nightReprocessGlobalUnavailableReason(
+                captureActive = false,
+                archiveMutationRunning = false,
+                transcriptionModelPhase = TranscriptionModelPhase.ERROR,
+                transcriptionRuntimePhase = TranscriptionRuntimePhase.IDLE,
+                enrichmentModelPhase = EnrichmentModelPhase.INSTALLED,
+                enrichmentRuntimePhase = EnrichmentRuntimePhase.IDLE,
+                requiresTranscriptionModel = true,
+            ).orEmpty().contains("transcription model"),
         )
     }
 

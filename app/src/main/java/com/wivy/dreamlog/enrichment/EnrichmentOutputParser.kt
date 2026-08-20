@@ -117,18 +117,33 @@ object EnrichmentOutputParser {
             val sourceText = sources.joinToString(separator = " ") { it.unit.text }
             val sourceUncertain = sourceExpressesUncertainty(sourceText)
             val sourceIncomplete = sourceExpressesIncompleteRecall(sourceText)
+            val explicitDreamBoundary = parts.any { part ->
+                val beginsAtExplicitDream =
+                    units[part.startOrdinal].cue == EnrichmentCue.NEW_DREAM
+                val followedByExplicitDream = units.getOrNull(part.endOrdinal + 1)?.let { following ->
+                    following.sessionOrder == units[part.endOrdinal].sessionOrder &&
+                        following.cue == EnrichmentCue.NEW_DREAM
+                } == true
+                beginsAtExplicitDream || followedByExplicitDream
+            }
             EnrichedDreamDraft(
                 order = dreamIndex,
                 // One recurring label is one logical Dream. A fragmentary returned part may
-                // make it uncertain, but does not demote an otherwise substantive Dream.
+                // make it uncertain, but does not demote an otherwise substantive Dream. A
+                // forced explicit boundary also establishes Dream identity on both sides; an
+                // independently incomplete source or orphan continuation remains a fragment.
                 kind = if (
                     orphanContinuation ||
-                    sourceIncomplete ||
-                    parts.all { it.kind == EnrichedDreamKind.FRAGMENT }
+                    sourceIncomplete
                 ) {
                     EnrichedDreamKind.FRAGMENT
-                } else {
+                } else if (
+                    explicitDreamBoundary ||
+                    parts.any { it.kind == EnrichedDreamKind.DREAM }
+                ) {
                     EnrichedDreamKind.DREAM
+                } else {
+                    EnrichedDreamKind.FRAGMENT
                 },
                 generatedTitle = null,
                 generatedText = sources.toReadableText(),

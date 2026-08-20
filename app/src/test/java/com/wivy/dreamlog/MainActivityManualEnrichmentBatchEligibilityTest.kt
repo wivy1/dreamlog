@@ -171,6 +171,13 @@ class MainActivityManualEnrichmentBatchEligibilityTest {
                         "[code=inference_failed; retryable=true]",
             ).isReadyForManualEnrichmentBatch(),
         )
+        assertTrue(
+            record(
+                enrichmentState = ProcessingState.FAILED,
+                enrichmentFailure =
+                    "The input is too large. [code=input_too_large; retryable=false]",
+            ).isReadyForManualEnrichmentBatch(),
+        )
     }
 
     @Test
@@ -238,7 +245,7 @@ class MainActivityManualEnrichmentBatchEligibilityTest {
             record(
                 enrichmentState = ProcessingState.FAILED,
                 enrichmentFailure =
-                    "The input is too large. [code=input_too_large; retryable=false]",
+                    "The raw source is invalid. [code=invalid_source; retryable=false]",
             ).isReadyForManualEnrichmentBatch(),
         )
     }

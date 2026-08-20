@@ -151,8 +151,8 @@ enum class EnrichmentFailureCode(
         false,
     ),
     INPUT_TOO_LARGE(
-        "input_too_large",
-        "The whole-night transcript exceeds this local model's measured context budget. The raw transcript remains available.",
+        "capture_input_too_large",
+        "One capture exceeds this local model's context budget. The raw transcript remains available to retry after an app update.",
         false,
     ),
     INVALID_SOURCE("invalid_source", "The ordered raw transcript source is invalid.", false),
@@ -600,8 +600,11 @@ class NightEnrichmentCoordinator(
                     dreams = emptyList(),
                 )
             } else {
-                val request = try {
-                    EnrichmentPromptBuilder.build(input, claim.attempt)
+                val captureInputs = input.capturePartitions()
+                val requests = try {
+                    captureInputs.map { capture ->
+                        EnrichmentPromptBuilder.build(capture, claim.attempt)
+                    }
                 } catch (_: EnrichmentInputTooLargeException) {
                     return fail(
                         nightId,
@@ -634,7 +637,7 @@ class NightEnrichmentCoordinator(
                     engineHolder.engine = opened
                     opened
                 }
-                val response = try {
+                val responses = try {
                     publish(
                         onProgress,
                         operationState.advance(
@@ -643,7 +646,7 @@ class NightEnrichmentCoordinator(
                             true,
                         ),
                     )
-                    engine.generate(request)
+                    requests.map(engine::generate)
                 } catch (_: EnrichmentInputTooLargeException) {
                     return fail(
                         nightId,
@@ -672,9 +675,17 @@ class NightEnrichmentCoordinator(
                     ),
                 )
                 try {
-                    EnrichmentOutputParser.parse(
-                        outputJson = response.rawJsonObject,
+                    val captureResults = captureInputs.zip(responses).map { (capture, response) ->
+                        EnrichmentOutputParser.parse(
+                            outputJson = response.rawJsonObject,
+                            input = capture,
+                            expectedAttempt = claim.attempt,
+                        )
+                    }
+                    mergeCaptureEnrichments(
                         input = input,
+                        captureInputs = captureInputs,
+                        captureResults = captureResults,
                         expectedAttempt = claim.attempt,
                     )
                 } catch (failure: EnrichmentOutputException) {

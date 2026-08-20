@@ -659,11 +659,20 @@ object TranscriptionRuntimeStore {
             // attempt instead of a stale warm-device reason.
             if (reseedWarmLatch) runtime.pauseStore.clear()
             val engine = SherpaParakeetTranscriptionEngine(verifiedModel)
+            val speechBoundaryAnalyzer = try {
+                SileroSessionSpeechBoundaryAnalyzer(runtime.appContext.assets)
+            } catch (_: Exception) {
+                // Natural silence is preferable for long-form cuts, but bounded decoding remains
+                // mandatory and the conservative PCM analyzer still supplies safe hints when the
+                // already-bundled VAD cannot initialize.
+                PcmSilenceSessionSpeechBoundaryAnalyzer()
+            }
             val progress = NightTranscriptionCoordinator(
                 nightDao = runtime.nightDao,
                 transcriptionDao = runtime.transcriptionDao,
                 audioRootDirectory = runtime.audioRootDirectory,
                 engine = engine,
+                speechBoundaryAnalyzer = speechBoundaryAnalyzer,
                 continuationGate = continuationGate,
             ).use { coordinator ->
                 when (request) {

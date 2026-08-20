@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 const val ENRICHMENT_SCHEMA_VERSION = 6
-const val ENRICHMENT_PROMPT_VERSION = "16"
+const val ENRICHMENT_PROMPT_VERSION = "18"
 
 private val SAFE_SOURCE_IDENTIFIER = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 private val SHA_256 = Regex("[0-9a-f]{64}")
@@ -202,6 +202,16 @@ data class OrderedNightTranscript private constructor(
     }
 }
 
+/**
+ * Returns one canonical input per wakeword capture while preserving the whole night's ordering.
+ * Capture boundaries are already hard semantic boundaries for enrichment, so each partition can
+ * be inferred in a fresh bounded conversation without changing the result contract.
+ */
+internal fun OrderedNightTranscript.capturePartitions(): List<OrderedNightTranscript> = segments
+    .groupBy(NightTranscriptSegment::sessionId)
+    .values
+    .map { captureSegments -> OrderedNightTranscript.create(nightId, captureSegments) }
+
 enum class EnrichedDreamKind(val wireValue: String) {
     DREAM("dream"),
     FRAGMENT("fragment"),
@@ -290,6 +300,56 @@ data class ValidatedEnrichment(
             "Generated dreams must have contiguous chronological order."
         }
     }
+}
+
+internal fun mergeCaptureEnrichments(
+    input: OrderedNightTranscript,
+    captureInputs: List<OrderedNightTranscript>,
+    captureResults: List<ValidatedEnrichment>,
+    expectedAttempt: Int,
+): ValidatedEnrichment {
+    if (captureInputs.size != captureResults.size) {
+        throw EnrichmentOutputException(EnrichmentOutputReason.SCHEMA_MISMATCH)
+    }
+    val partitionedSourceIds = captureInputs.flatMap { capture ->
+        capture.segments.map(NightTranscriptSegment::id)
+    }
+    if (partitionedSourceIds != input.segments.map(NightTranscriptSegment::id)) {
+        throw EnrichmentOutputException(EnrichmentOutputReason.INCOMPLETE_COVERAGE)
+    }
+
+    val mergedDreams = mutableListOf<EnrichedDreamDraft>()
+    captureInputs.zip(captureResults).forEach { (capture, result) ->
+        if (
+            result.schemaVersion != ENRICHMENT_SCHEMA_VERSION ||
+            result.attempt != expectedAttempt ||
+            result.inputFingerprintSha256 != capture.fingerprintSha256
+        ) {
+            throw EnrichmentOutputException(EnrichmentOutputReason.SCHEMA_MISMATCH)
+        }
+        val expectedSourceCounts = capture.segments
+            .map(NightTranscriptSegment::id)
+            .groupingBy { it }
+            .eachCount()
+        val resultSourceCounts = result.dreams
+            .flatMap(EnrichedDreamDraft::sourceSpans)
+            .flatMap(EnrichedSourceSpan::segmentIds)
+            .groupingBy { it }
+            .eachCount()
+        if (resultSourceCounts != expectedSourceCounts) {
+            throw EnrichmentOutputException(EnrichmentOutputReason.INCOMPLETE_COVERAGE)
+        }
+        result.dreams.forEach { dream ->
+            mergedDreams += dream.copy(order = mergedDreams.size)
+        }
+    }
+
+    return ValidatedEnrichment(
+        schemaVersion = ENRICHMENT_SCHEMA_VERSION,
+        attempt = expectedAttempt,
+        inputFingerprintSha256 = input.fingerprintSha256,
+        dreams = mergedDreams,
+    )
 }
 
 internal enum class EnrichmentOutputReason(val safeDetail: String) {

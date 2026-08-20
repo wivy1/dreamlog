@@ -199,7 +199,7 @@ internal class LiteRtEnrichmentEngine(
 private fun nanosToMillis(nanos: Long): Long = nanos / 1_000_000L
 
 private const val ENGINE_ID = "dreamlog-litert-enrichment"
-internal const val ENRICHMENT_ENGINE_VERSION = "11"
+internal const val ENRICHMENT_ENGINE_VERSION = "12"
 private const val RUNTIME_ID = "litert-lm-kotlin"
 private const val RUNTIME_VERSION = "0.14.0"
 internal const val MODEL_CONTEXT_TOKENS = 2_048

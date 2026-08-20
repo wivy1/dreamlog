@@ -45,9 +45,14 @@ class RoomNightEnrichmentStoreTest {
                 "Local enrichment inference stopped. [code=inference_failed; retryable=true]",
             ),
         )
-        assertFalse(
+        assertTrue(
             persistedEnrichmentFailureIsRetryable(
                 "The raw transcript remains available. [code=input_too_large; retryable=false]",
+            ),
+        )
+        assertFalse(
+            persistedEnrichmentFailureIsRetryable(
+                "The raw transcript is invalid. [code=invalid_source; retryable=false]",
             ),
         )
         assertTrue(

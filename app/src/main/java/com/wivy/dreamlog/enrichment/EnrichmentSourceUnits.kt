@@ -130,8 +130,40 @@ private val ORDINAL_DREAM_WORDS = listOf(
     "tenth",
 )
 
+private val BACKWARD_NEW_DREAM_CUE_PHRASES: List<List<String>> = buildList {
+    val introductions = listOf(
+        listOf("there", "was"),
+        listOf("there", "had", "been"),
+        listOf("i", "had"),
+        listOf("i", "remember"),
+        listOf("i", "remembered"),
+    )
+    val determiners = listOf(listOf("a"), listOf("another"))
+    val backwardMarkers = listOf(
+        listOf("before", "that"),
+        listOf("before", "this"),
+        listOf("earlier"),
+    )
+    introductions.forEach { introduction ->
+        determiners.forEach { determiner ->
+            backwardMarkers.forEach { marker ->
+                add(introduction + determiner + listOf("dream") + marker)
+                add(marker + introduction + determiner + listOf("dream"))
+            }
+        }
+        add(introduction + listOf("an", "earlier", "dream"))
+    }
+}.flatMap { phrase ->
+    listOf(phrase, listOf("and") + phrase)
+}.distinct().sortedByDescending(List<String>::size)
+
+private val BACKWARD_NEW_DREAM_CUE_TEXTS = BACKWARD_NEW_DREAM_CUE_PHRASES.map { phrase ->
+    phrase.joinToString(separator = " ")
+}
+
 private val CUE_PHRASES: List<List<String>> = buildList {
     // Long forms precede their natural suffixes so one spoken cue yields one unit boundary.
+    addAll(BACKWARD_NEW_DREAM_CUE_PHRASES)
     add(listOf("that", "dream", "ended", "and", "my", "next", "dream"))
     add(listOf("i", "remember", "more", "about", "the", "same"))
     add(listOf("suddenly", "a", "different", "dream"))
@@ -176,6 +208,9 @@ private fun sourceExpressesDreamReturn(normalized: String): Boolean =
 private fun sourceExpressesNewDream(normalized: String): Boolean =
     "next dream" in normalized ||
         "different dream" in normalized ||
+        BACKWARD_NEW_DREAM_CUE_TEXTS.any { cue ->
+            normalized == cue || normalized.startsWith("$cue ")
+        } ||
         NEW_DREAM_ORDINAL_REFERENCE.containsMatchIn(normalized)
 
 private fun findCuePhraseEnds(

@@ -158,7 +158,7 @@ class NightEnrichmentCoordinatorTest {
     }
 
     @Test
-    fun measuredContextOverflowIsNonRetryableAndPreservesRawFallback() {
+    fun measuredSingleCaptureOverflowIsTerminalAndPreservesRawFallback() {
         val store = FakeStore(completedSource())
         val factory = FakeEngineFactory(response = { throw EnrichmentInputTooLargeException() })
 
@@ -169,7 +169,7 @@ class NightEnrichmentCoordinatorTest {
         assertEquals(EnrichmentFailureCode.INPUT_TOO_LARGE, outcome.code)
         assertFalse(outcome.retryable)
         assertTrue(outcome.rawFallbackAvailable)
-        assertEquals("input_too_large", store.failed?.code)
+        assertEquals("capture_input_too_large", store.failed?.code)
         assertEquals(0, store.completeCount)
         assertEquals(1, factory.closeCount)
     }
@@ -198,9 +198,109 @@ class NightEnrichmentCoordinatorTest {
         assertEquals(EnrichmentFailureCode.INPUT_TOO_LARGE, outcome.code)
         assertFalse(outcome.retryable)
         assertTrue(outcome.rawFallbackAvailable)
-        assertEquals("input_too_large", store.failed?.code)
+        assertEquals("capture_input_too_large", store.failed?.code)
         assertEquals(0, factory.openCount)
         assertEquals(0, factory.closeCount)
+    }
+
+    @Test
+    fun captureBoundedInferenceMergesOneAtomicWholeNightResult() {
+        val segments = listOf(
+            sourceSegment("session-a", sessionOrder = 0, text = "first dream source"),
+            sourceSegment("session-b", sessionOrder = 1, text = "second dream source"),
+        )
+        val store = FakeStore(completedSource(segments))
+        val factory = FakeEngineFactory(response = {
+            EnrichmentEngineResult(validOutput())
+        })
+
+        val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Completed)
+        outcome as EnrichmentRunOutcome.Completed
+        assertEquals(2, factory.generateCount)
+        assertEquals(1, factory.openCount)
+        assertEquals(1, factory.closeCount)
+        assertEquals(1, store.completeCount)
+        assertEquals(2, outcome.dreamCount)
+        assertEquals(listOf(0, 1), store.completed!!.dreams.map(EnrichedDreamDraft::order))
+        assertEquals(
+            listOf("session-a", "session-b"),
+            store.completed!!.dreams.map { dream -> dream.sourceSpans.single().sessionId },
+        )
+        assertEquals(
+            OrderedNightTranscript.create(NIGHT_ID, segments).fingerprintSha256,
+            store.completed!!.inputFingerprintSha256,
+        )
+    }
+
+    @Test
+    fun aggregateOversizeAcrossCapturesUsesBoundedRequests() {
+        val segments = (0 until 2).flatMap { sessionOrder ->
+            (0 until 220).map { segmentIndex ->
+                sourceSegment(
+                    sessionId = "session-$sessionOrder",
+                    sessionOrder = sessionOrder,
+                    segmentIndex = segmentIndex,
+                    text = "abcdefghij",
+                )
+            }
+        }
+        val input = OrderedNightTranscript.create(NIGHT_ID, segments)
+        assertTrue(
+            runCatching { EnrichmentPromptBuilder.build(input, attempt = 1) }
+                .exceptionOrNull() is EnrichmentInputTooLargeException,
+        )
+        assertTrue(
+            input.capturePartitions().all { capture ->
+                EnrichmentPromptBuilder.build(capture, attempt = 1)
+                    .userContent.length <= MAX_ENRICHMENT_USER_CONTENT_CHARACTERS
+            },
+        )
+        val store = FakeStore(completedSource(segments))
+        val factory = FakeEngineFactory(response = { request ->
+            val lastAlias = Regex("s[0-9]+")
+                .findAll(request.userContent.lineSequence().first())
+                .last()
+                .value
+            EnrichmentEngineResult(
+                "{\"parts\":[{\"dream\":\"d0\",\"kind\":\"dream\"," +
+                    "\"uncertain\":false,\"start\":\"s0\",\"end\":\"$lastAlias\"}]}",
+            )
+        })
+
+        val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Completed)
+        assertEquals(2, factory.generateCount)
+        assertEquals(1, store.completeCount)
+        assertEquals(2, store.completed!!.dreams.size)
+    }
+
+    @Test
+    fun laterCaptureFailurePersistsNoPartialEnrichment() {
+        val segments = listOf(
+            sourceSegment("session-a", sessionOrder = 0, text = "first dream source"),
+            sourceSegment("session-b", sessionOrder = 1, text = "second dream source"),
+        )
+        val store = FakeStore(completedSource(segments))
+        var invocation = 0
+        val factory = FakeEngineFactory(response = {
+            invocation += 1
+            if (invocation == 2) throw IllegalStateException("private model detail")
+            EnrichmentEngineResult(validOutput())
+        })
+
+        val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Failure)
+        outcome as EnrichmentRunOutcome.Failure
+        assertEquals(EnrichmentFailureCode.INFERENCE_FAILED, outcome.code)
+        assertEquals(2, factory.generateCount)
+        assertEquals(0, store.completeCount)
+        assertNull(store.completed)
+        assertEquals("inference_failed", store.failed?.code)
+        assertFalse(store.failed!!.detail.contains("private model detail"))
     }
 
     @Test
@@ -462,6 +562,22 @@ class NightEnrichmentCoordinatorTest {
             clock = { time++ },
         )
     }
+
+    private fun sourceSegment(
+        sessionId: String,
+        sessionOrder: Int,
+        segmentIndex: Int = 0,
+        text: String,
+    ) = NightTranscriptSegment(
+        nightId = NIGHT_ID,
+        sessionId = sessionId,
+        sessionOrder = sessionOrder,
+        transcriptAttempt = 1,
+        segmentIndex = segmentIndex,
+        sourceStartMillis = segmentIndex * 100L,
+        sourceEndMillis = (segmentIndex + 1L) * 100L,
+        text = text,
+    )
 
     private fun completedSource(
         segments: List<NightTranscriptSegment> = listOf(

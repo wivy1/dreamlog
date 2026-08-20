@@ -116,6 +116,7 @@ import com.wivy.dreamlog.settings.AppSettingsStore
 import com.wivy.dreamlog.settings.RetentionPeriod
 import com.wivy.dreamlog.transcription.TranscriptionModelPhase
 import com.wivy.dreamlog.transcription.CaptureTranscriptionOperationGate
+import com.wivy.dreamlog.transcription.SherpaParakeetTranscriptionEngine
 import com.wivy.dreamlog.transcription.TranscriptionRuntimePhase
 import com.wivy.dreamlog.transcription.TranscriptionRuntimeSnapshot
 import com.wivy.dreamlog.transcription.TranscriptionRuntimeStore
@@ -1048,7 +1049,7 @@ internal fun NightRecord.hasGenuinelyEmptyEnrichmentSource(): Boolean =
         night.transcriptionState != ProcessingState.FAILED &&
         night.transcriptionFailure == null
 
-private fun NightRecord.hasCompleteEnrichmentSource(): Boolean {
+internal fun NightRecord.hasCompleteEnrichmentSource(): Boolean {
     if (
         sessions.isEmpty() ||
         night.transcriptionState != ProcessingState.COMPLETE ||
@@ -1122,6 +1123,29 @@ private fun NightRecord.hasCompleteEnrichmentSource(): Boolean {
     }.isSuccess
 }
 
+internal enum class NightReprocessMode {
+    ENRICHMENT_ONLY,
+    RETRANSCRIBE_THEN_ENRICH,
+}
+
+internal fun selectNightReprocessMode(
+    hasCompleteEnrichmentSource: Boolean,
+    everyTranscriptUsesCurrentPipeline: Boolean,
+): NightReprocessMode = if (
+    hasCompleteEnrichmentSource && everyTranscriptUsesCurrentPipeline
+) {
+    NightReprocessMode.ENRICHMENT_ONLY
+} else {
+    NightReprocessMode.RETRANSCRIBE_THEN_ENRICH
+}
+
+internal fun NightRecord.nightReprocessMode(): NightReprocessMode = selectNightReprocessMode(
+    hasCompleteEnrichmentSource = hasCompleteEnrichmentSource(),
+    everyTranscriptUsesCurrentPipeline = transcripts.isNotEmpty() && transcripts.all { record ->
+        SherpaParakeetTranscriptionEngine.hasCurrentProvenance(record.transcript)
+    },
+)
+
 private enum class CuePreviewState {
     IDLE,
     PLAYING,
@@ -1133,6 +1157,7 @@ internal enum class NightReprocessPhase {
     IDLE,
     TRANSCRIBING,
     ENRICHING,
+    ENRICHING_PRESERVED_TRANSCRIPT,
 }
 
 internal data class NightReprocessProcessState(
@@ -1191,6 +1216,7 @@ internal fun nightReprocessGlobalUnavailableReason(
     transcriptionRuntimePhase: TranscriptionRuntimePhase,
     enrichmentModelPhase: EnrichmentModelPhase,
     enrichmentRuntimePhase: EnrichmentRuntimePhase,
+    requiresTranscriptionModel: Boolean = true,
 ): String? = when {
     captureActive -> "End the active night before reprocessing saved nights."
     archiveMutationRunning -> "Wait for the current archive change to finish."
@@ -1200,11 +1226,8 @@ internal fun nightReprocessGlobalUnavailableReason(
     enrichmentRuntimePhase == EnrichmentRuntimePhase.RUNNING ->
         "Dream regrouping is still running. Reprocessing becomes available when it finishes."
 
-    transcriptionModelPhase in setOf(
-        TranscriptionModelPhase.UNINITIALIZED,
-        TranscriptionModelPhase.VERIFYING,
-        TranscriptionModelPhase.VERIFICATION_DEFERRED,
-    ) -> "The local transcription model is still being checked."
+    transcriptionModelPhase == TranscriptionModelPhase.VERIFYING ->
+        "The local transcription model is still being checked."
 
     transcriptionModelPhase in setOf(
         TranscriptionModelPhase.INSTALLING,
@@ -1212,10 +1235,16 @@ internal fun nightReprocessGlobalUnavailableReason(
         TranscriptionModelPhase.REMOVING,
     ) -> "Wait for the transcription model operation to finish."
 
-    transcriptionModelPhase == TranscriptionModelPhase.NOT_INSTALLED ->
+    requiresTranscriptionModel && transcriptionModelPhase in setOf(
+        TranscriptionModelPhase.UNINITIALIZED,
+        TranscriptionModelPhase.VERIFICATION_DEFERRED,
+    ) -> "The local transcription model is still being checked."
+
+    requiresTranscriptionModel &&
+        transcriptionModelPhase == TranscriptionModelPhase.NOT_INSTALLED ->
         "Install the current local transcription model from the home screen."
 
-    transcriptionModelPhase in setOf(
+    requiresTranscriptionModel && transcriptionModelPhase in setOf(
         TranscriptionModelPhase.INVALID,
         TranscriptionModelPhase.ERROR,
     ) -> "Repair the local transcription model from the home screen before reprocessing."
@@ -1367,9 +1396,19 @@ private fun DreamLogApp(
         when (transcriptionRuntime.transcriptionPhase) {
             TranscriptionRuntimePhase.RUNNING -> Unit
             TranscriptionRuntimePhase.ERROR -> {
-                reprocessPhaseName = NightReprocessPhase.IDLE.name
-                reprocessMessage = transcriptionRuntime.transcriptionError
+                val failureMessage = transcriptionRuntime.transcriptionError
                     ?: "Re-transcription failed. Existing generated text and raw audio were kept."
+                reprocessPhaseName =
+                    NightReprocessPhase.ENRICHING_PRESERVED_TRANSCRIPT.name
+                reprocessMessage =
+                    "$failureMessage Regrouping the preserved transcript with the latest " +
+                        "enrichment model…"
+                if (!EnrichmentRuntimeStore.processNight(selectedNightId)) {
+                    reprocessPhaseName = NightReprocessPhase.IDLE.name
+                    reprocessMessage =
+                        "$failureMessage Dream regrouping could not start; try again when local " +
+                            "processing is idle."
+                }
             }
             TranscriptionRuntimePhase.IDLE -> {
                 reprocessPhaseName = NightReprocessPhase.ENRICHING.name
@@ -1395,18 +1434,32 @@ private fun DreamLogApp(
         enrichmentRuntime.batchFailedNightCount,
     ) {
         val selectedNightId = reprocessNightId ?: return@LaunchedEffect
-        if (reprocessPhase != NightReprocessPhase.ENRICHING) return@LaunchedEffect
+        if (
+            reprocessPhase !in setOf(
+                NightReprocessPhase.ENRICHING,
+                NightReprocessPhase.ENRICHING_PRESERVED_TRANSCRIPT,
+            )
+        ) {
+            return@LaunchedEffect
+        }
         if (enrichmentRuntime.nightId != selectedNightId) return@LaunchedEffect
         when (enrichmentRuntime.runtimePhase) {
             EnrichmentRuntimePhase.RUNNING -> Unit
             EnrichmentRuntimePhase.ERROR -> {
                 reprocessPhaseName = NightReprocessPhase.IDLE.name
                 reprocessMessage = enrichmentRuntime.runtimeError
-                    ?: "The transcript was replaced, but dream regrouping needs to be retried."
+                    ?: "Dream regrouping needs to be retried. The previous generated dreams were kept."
             }
             EnrichmentRuntimePhase.IDLE -> {
+                val usedPreservedTranscript =
+                    reprocessPhase == NightReprocessPhase.ENRICHING_PRESERVED_TRANSCRIPT
                 reprocessPhaseName = NightReprocessPhase.IDLE.name
-                reprocessMessage = "Reprocessing complete with the latest local models."
+                reprocessMessage = if (usedPreservedTranscript) {
+                    "Reprocessing complete: dreams regrouped from the preserved transcript after " +
+                        "re-transcription could not finish."
+                } else {
+                    "Reprocessing complete: dreams regrouped with the latest enrichment model."
+                }
             }
         }
     }
@@ -1503,6 +1556,8 @@ private fun DreamLogApp(
             val selectedRecord = historyUiState.nights.firstOrNull {
                 it.night.nightId == nightId
             }
+            val selectedReprocessMode = selectedRecord?.nightReprocessMode()
+                ?: NightReprocessMode.RETRANSCRIBE_THEN_ENRICH
             NightDetailScreen(
                 record = selectedRecord,
                 captureActive = runtime.active,
@@ -1527,7 +1582,11 @@ private fun DreamLogApp(
                     transcriptionRuntimePhase = transcriptionRuntime.transcriptionPhase,
                     enrichmentModelPhase = enrichmentRuntime.modelPhase,
                     enrichmentRuntimePhase = enrichmentRuntime.runtimePhase,
+                    requiresTranscriptionModel =
+                        selectedReprocessMode == NightReprocessMode.RETRANSCRIBE_THEN_ENRICH,
                 ),
+                reprocessRequiresTranscription =
+                    selectedReprocessMode == NightReprocessMode.RETRANSCRIBE_THEN_ENRICH,
                 reprocessRunning = nightId == reprocessNightId &&
                     reprocessPhase != NightReprocessPhase.IDLE,
                 reprocessMessage = reprocessMessage.takeIf { nightId == reprocessNightId },
@@ -1546,13 +1605,26 @@ private fun DreamLogApp(
                 onReprocessNight = { selectedNightId ->
                     reprocessOwnerProcessInstanceId = TranscriptionRuntimeStore.processInstanceId
                     reprocessNightId = selectedNightId
-                    reprocessMessage = "Re-transcribing every retained wakeword session…"
-                    reprocessPhaseName = NightReprocessPhase.TRANSCRIBING.name
-                    if (!TranscriptionRuntimeStore.retranscribeNight(selectedNightId)) {
-                        reprocessPhaseName = NightReprocessPhase.IDLE.name
+                    if (selectedReprocessMode == NightReprocessMode.ENRICHMENT_ONLY) {
                         reprocessMessage =
-                            "Reprocessing could not start. Finish the current local operation " +
-                                "and verify both models are installed."
+                            "The saved transcript already uses the current speech model. " +
+                                "Regrouping dreams with the latest enrichment model…"
+                        reprocessPhaseName = NightReprocessPhase.ENRICHING.name
+                        if (!EnrichmentRuntimeStore.processNight(selectedNightId)) {
+                            reprocessPhaseName = NightReprocessPhase.IDLE.name
+                            reprocessMessage =
+                                "Dream regrouping could not start. Finish the current local " +
+                                    "operation and verify the enrichment model is installed."
+                        }
+                    } else {
+                        reprocessMessage = "Re-transcribing every retained wakeword session…"
+                        reprocessPhaseName = NightReprocessPhase.TRANSCRIBING.name
+                        if (!TranscriptionRuntimeStore.retranscribeNight(selectedNightId)) {
+                            reprocessPhaseName = NightReprocessPhase.IDLE.name
+                            reprocessMessage =
+                                "Reprocessing could not start. Finish the current local operation " +
+                                    "and verify both models are installed."
+                        }
                     }
                 },
                 onDeleteNightRawAudio = onDeleteNightRawAudio,

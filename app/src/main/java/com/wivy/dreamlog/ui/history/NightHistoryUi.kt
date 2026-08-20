@@ -177,6 +177,7 @@ fun NightDetailScreen(
     transcriptionRunning: Boolean = false,
     transcriptionMessage: String? = null,
     reprocessUnavailableReason: String? = null,
+    reprocessRequiresTranscription: Boolean = true,
     reprocessRunning: Boolean = false,
     reprocessMessage: String? = null,
     onTranscribeNight: (String) -> Unit = {},
@@ -347,6 +348,7 @@ fun NightDetailScreen(
                         record = record,
                         blocked = reviewActionsBlocked,
                         reprocessUnavailableReason = reprocessUnavailableReason,
+                        reprocessRequiresTranscription = reprocessRequiresTranscription,
                         reprocessRunning = reprocessRunning,
                         reprocessMessage = reprocessMessage,
                         onReprocessNight = {

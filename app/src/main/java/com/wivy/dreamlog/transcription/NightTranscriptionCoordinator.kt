@@ -11,6 +11,7 @@ import com.wivy.dreamlog.history.TranscriptSegmentDraft
 import com.wivy.dreamlog.history.TranscriptionDao
 import com.wivy.dreamlog.history.TranscriptionProvenance
 import java.io.File
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
@@ -27,7 +28,8 @@ class NightTranscriptionCoordinator internal constructor(
     private val transcriptionDao: TranscriptionDao,
     private val audioRootDirectory: File,
     private val engine: TranscriptionEngine,
-    private val speechBoundaryAnalyzer: SessionSpeechBoundaryAnalyzer? = null,
+    private val speechBoundaryAnalyzer: SessionSpeechBoundaryAnalyzer? =
+        PcmSilenceSessionSpeechBoundaryAnalyzer(),
     private val continuationGate: TranscriptionContinuationGate =
         TranscriptionContinuationGate.ALWAYS_CONTINUE,
     private val clock: () -> Long = System::currentTimeMillis,
@@ -180,7 +182,8 @@ class NightTranscriptionCoordinator internal constructor(
             )
             val result = engine.transcribe(
                 audioFile = audioFile,
-                input = transcriptionInput(
+                input = preparedTranscriptionInput(
+                    audioFile = audioFile,
                     session = session,
                     triggeringWakePhrase = triggeringWakePhrase(source, session.sessionId),
                 ),
@@ -238,17 +241,21 @@ class NightTranscriptionCoordinator internal constructor(
             "Every retained session must already have a completed transcript."
         }
 
+        var fallbackProgress: NightTranscriptionProgress? = null
         val replacements = sessions.map { session ->
             val startedAt = clock().coerceAtLeast(0L)
             activeSessionId.set(session.sessionId)
-            publish(onProgress, readProgress(nightId))
+            val activeProgress = readProgress(nightId)
+            fallbackProgress = activeProgress.copy(activeSessionId = null)
+            publish(onProgress, activeProgress)
             val audioFile = resolveAudioFile(
                 nightId = nightId,
                 audioFileName = session.audioFileName,
             )
             val result = engine.transcribe(
                 audioFile = audioFile,
-                input = transcriptionInput(
+                input = preparedTranscriptionInput(
+                    audioFile = audioFile,
                     session = session,
                     triggeringWakePhrase = triggeringWakePhrase(source, session.sessionId),
                 ),
@@ -276,7 +283,10 @@ class NightTranscriptionCoordinator internal constructor(
             ),
         ) { "The completed night transcripts could not be replaced." }
 
-        readProgress(nightId).also { publish(onProgress, it) }
+        val finalProgress = runCatching { readProgress(nightId) }
+            .getOrElse { checkNotNull(fallbackProgress) }
+        publish(onProgress, finalProgress)
+        finalProgress
     }
 
     /**
@@ -365,7 +375,8 @@ class NightTranscriptionCoordinator internal constructor(
             )
             val result = engine.transcribe(
                 audioFile = audioFile,
-                input = transcriptionInput(
+                input = preparedTranscriptionInput(
+                    audioFile = audioFile,
                     session = session,
                     triggeringWakePhrase = triggeringWakePhrase,
                 ),
@@ -493,6 +504,38 @@ class NightTranscriptionCoordinator internal constructor(
         )
     }
 
+    /** Adds non-speech cut hints only when the selected engine needs bounded serial decoding. */
+    private fun preparedTranscriptionInput(
+        audioFile: File,
+        session: CaptureSessionEntity,
+        triggeringWakePhrase: TriggeringWakePhrase?,
+    ): TranscriptionInput {
+        val input = transcriptionInput(session, triggeringWakePhrase)
+        val maximumDecodeSamples = engine.maximumDecodeSampleCount ?: return input
+        val resolvedEndSample = input.acousticRange.endSampleExclusive
+            ?: Pcm16WavSource.open(audioFile).sampleCount
+        if (resolvedEndSample - input.acousticRange.startSample <= maximumDecodeSamples) {
+            return input
+        }
+
+        val observedRanges = try {
+            speechBoundaryAnalyzer
+                ?.analyze(audioFile, input.acousticRange.startSample)
+                ?.nonSpeechRanges
+                .orEmpty()
+        } catch (_: Exception) {
+            // Boundary hints improve cut placement but never own source coverage. The engine's
+            // deterministic hard bound remains safe when analysis is unavailable.
+            emptyList()
+        }
+        val boundedRanges = observedRanges.mapNotNull { range ->
+            val start = maxOf(range.startSample, input.acousticRange.startSample)
+            val end = minOf(range.endSampleExclusive, resolvedEndSample)
+            if (end > start) SessionNonSpeechRange(start, end) else null
+        }
+        return input.copy(observedNonSpeechRanges = boundedRanges)
+    }
+
     /**
      * Returns the exact approved trigger persisted for this session, or null when journal evidence
      * is missing, malformed, unknown, or ambiguous. The transcription engine then falls back to
@@ -596,18 +639,18 @@ class NightTranscriptionCoordinator internal constructor(
     )
 
     private fun failureDetail(failure: Exception): String {
-        val detail = failure.message
-            ?.trim()
-            ?.takeIf(String::isNotBlank)
-            ?.take(MAX_FAILURE_DETAIL_LENGTH)
-        return buildString {
-            append("Local transcription failed. The retained audio was kept; resume transcription.")
-            if (detail != null) append(" ").append(detail)
+        val code = when (failure) {
+            is SecurityException -> "source_access_denied"
+            is IOException -> "source_read_failed"
+            is IllegalArgumentException -> "input_invalid"
+            is IllegalStateException -> "local_inference_failed"
+            else -> "unexpected_runtime_failure"
         }
+        return "Local transcription failed ($code). The retained audio was kept; " +
+            "resume transcription."
     }
 
     private companion object {
-        const val MAX_FAILURE_DETAIL_LENGTH = 400
         const val SESSION_STARTED_EVENT = "session_started"
         const val PHRASE_ATTRIBUTE = "phrase"
     }

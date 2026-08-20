@@ -24,7 +24,7 @@ object EnrichmentPromptBuilder {
 
         Rules:
         - The root has exactly "parts". Each part has exactly "dream", "kind", "uncertain", "start", and "end".
-        - Choose kind "dream" or "fragment". Use "fragment" for incomplete or disconnected material.
+        - Choose kind "dream" or "fragment". Use "fragment" only for material that is independently incomplete or disconnected, not merely because a complete Dream contains uncertain details.
         - Each start and end is one supplied alias. A range includes both endpoints.
         - Cover every alias exactly once with chronological, contiguous, nonoverlapping parts. The first part starts at s0, each next part starts immediately after the prior end, and the final part ends at the last alias.
         - Parts never share an endpoint. If the next part starts at sN, the prior part ends at the alias immediately before sN.
@@ -32,11 +32,13 @@ object EnrichmentPromptBuilder {
         - Dream labels are local to one capture. Start each capture with d0, then introduce d1, d2, and so on only for explicitly distinct dreams.
         - A label may recur later in the same capture. Reuse d0 for text such as "back in the first dream" instead of inventing another dream.
         - Every supplied semantic part start is mandatory. new-dream introduces the next unused label. dream-reference reuses the referenced earlier label, except an initial first-dream reference uses d0.
+        - An explicit earlier-dream introduction, including a dream said to occur before the currently described one, is new-dream and takes the next unused label. Labels follow first mention, not event chronology.
+        - Both sides of an explicit new-dream boundary identify Dreams. Do not mark a merged range or its repaired pieces as fragments merely because it contains two distinct Dream narratives.
         - A scene, place, character, or time change inside a narration is not by itself a new dream. Keep the same label unless the speaker distinguishes another dream.
         - addition and correction use the label of their explicit target. If no prior target is clear, give the material a new fragment label with uncertain true.
         - uncertain-fragment uses kind fragment and uncertain true.
         - Keep parts chronological. Never split one alias, skip an alias, repeat an alias, or use an alias that was not supplied.
-        - Words such as "maybe", "not sure", or "cannot remember" require uncertain true. "Cannot remember the rest" requires kind fragment and uncertain true. Never invent certainty or interpretation.
+        - Words such as "maybe", "not sure", or "cannot remember" require uncertain true, but uncertainty alone does not make a Dream a fragment. "Cannot remember the rest" requires kind fragment and uncertain true. Never invent certainty or interpretation.
         - Do not copy transcript text into the response. Do not output source lists, roles, schema, attempt, fingerprint, capture, order, title, or any other field.
         - For no segments, return {"parts":[]}.
     """.trimIndent()

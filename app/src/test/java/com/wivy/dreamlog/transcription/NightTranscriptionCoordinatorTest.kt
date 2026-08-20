@@ -9,6 +9,7 @@ import com.wivy.dreamlog.history.NightEventEntity
 import com.wivy.dreamlog.history.NightTranscriptionCounts
 import com.wivy.dreamlog.history.NightWithDetails
 import com.wivy.dreamlog.history.ProcessingState
+import com.wivy.dreamlog.history.SessionTranscriptReplacementDraft
 import com.wivy.dreamlog.history.SessionTranscriptEntity
 import com.wivy.dreamlog.history.SessionTranscriptWithSegments
 import com.wivy.dreamlog.history.TranscriptSegmentDraft
@@ -426,6 +427,48 @@ class NightTranscriptionCoordinatorTest {
     }
 
     @Test
+    fun longBoundedEngineReceivesAbsoluteNonSpeechHintsWithoutCroppingSource() {
+        val harness = harness(
+            sessions = listOf(
+                session(
+                    ID_A,
+                    captureOrder = 0,
+                    sampleCount = 640_000L,
+                    preRollSampleCount = 32_000L,
+                ),
+            ),
+        )
+        val observedRanges = listOf(
+            SessionNonSpeechRange(400_000L, 416_000L),
+            SessionNonSpeechRange(630_000L, 650_000L),
+        )
+        val analyzer = FakeSpeechBoundaryAnalyzer(
+            SessionSpeechBoundaryResult(
+                speechDetected = true,
+                leadingNonSpeechSamples = 0L,
+                trailingNonSpeechSamples = 10_000L,
+                nonSpeechRanges = observedRanges,
+            ),
+        )
+        val engine = FakeEngine().apply { decodeLimit = 480_000L }
+
+        harness.coordinator(engine, analyzer).processNight(NIGHT_ID)
+
+        assertEquals(listOf(32_000L), analyzer.analysisStarts)
+        assertEquals(
+            input(
+                startSample = 32_000L,
+                endSampleExclusive = 640_000L,
+                observedNonSpeechRanges = listOf(
+                    SessionNonSpeechRange(400_000L, 416_000L),
+                    SessionNonSpeechRange(630_000L, 640_000L),
+                ),
+            ),
+            engine.calls.single().second,
+        )
+    }
+
+    @Test
     fun failedSessionRetriesInPlaceWithoutLosingAudioOrDuplicatingSegments() {
         val harness = harness(sessions = listOf(session(ID_A, captureOrder = 0)))
         val engine = FakeEngine().apply { failuresRemaining = 1 }
@@ -439,6 +482,12 @@ class NightTranscriptionCoordinatorTest {
         val firstAttempt = harness.transcriptionDao.readSessionTranscript(ID_A)!!
         assertEquals(1, firstAttempt.transcript.attemptCount)
         assertTrue(firstAttempt.segments.isEmpty())
+        assertEquals(
+            "Local transcription failed (local_inference_failed). The retained audio was kept; " +
+                "resume transcription.",
+            firstAttempt.transcript.failureDetail,
+        )
+        assertFalse(firstAttempt.transcript.failureDetail!!.contains("forced local inference"))
 
         val complete = coordinator.retrySession(NIGHT_ID, ID_A)
 
@@ -665,6 +714,29 @@ class NightTranscriptionCoordinatorTest {
     }
 
     @Test
+    fun postCommitProgressReadFailureDoesNotMisreportSuccessfulNightRetranscription() {
+        val harness = harness(
+            sessions = listOf(
+                session(ID_A, captureOrder = 0),
+                session(ID_B, captureOrder = 1),
+            ),
+        )
+        seedCompletedTranscript(harness, ID_A, "prior A")
+        seedCompletedTranscript(harness, ID_B, "prior B")
+        harness.transcriptionDao.failProgressReadAfterNightReplacement = true
+
+        val complete = harness.coordinator(FakeEngine()).retranscribeNight(NIGHT_ID)
+
+        assertEquals(2, complete.completedSessionCount)
+        assertEquals(null, complete.activeSessionId)
+        listOf(ID_A, ID_B).forEach { sessionId ->
+            val replaced = harness.transcriptionDao.readSessionTranscript(sessionId)!!
+            assertEquals("text for ${fileName(sessionId)}", replaced.transcript.rawText)
+            assertEquals(2, replaced.transcript.attemptCount)
+        }
+    }
+
+    @Test
     fun failedLaterNightRetranscriptionPreservesEveryPriorCompletedResult() {
         val harness = harness(
             sessions = listOf(
@@ -786,8 +858,12 @@ class NightTranscriptionCoordinatorTest {
             modelSha256 = "a".repeat(64),
         )
         val calls = mutableListOf<Pair<File, TranscriptionInput>>()
+        var decodeLimit: Long? = null
         var failuresRemaining = 0
         var failOnCallNumber: Int? = null
+
+        override val maximumDecodeSampleCount: Long?
+            get() = decodeLimit
 
         override fun transcribe(
             audioFile: File,
@@ -909,6 +985,10 @@ class NightTranscriptionCoordinatorTest {
                 failNextRead = true
             }
         }
+
+        fun armNextReadFailure() {
+            failNextRead = true
+        }
     }
 
     private class FakeTranscriptionDao(
@@ -916,6 +996,19 @@ class NightTranscriptionCoordinatorTest {
     ) : TranscriptionDao() {
         private val transcripts = linkedMapOf<String, SessionTranscriptEntity>()
         private val segmentsBySession = linkedMapOf<String, MutableList<TranscriptSegmentEntity>>()
+        var failProgressReadAfterNightReplacement = false
+
+        override fun replaceCompletedNight(
+            nightId: String,
+            provenance: TranscriptionProvenance,
+            replacements: List<SessionTranscriptReplacementDraft>,
+        ): Boolean {
+            val replaced = super.replaceCompletedNight(nightId, provenance, replacements)
+            if (replaced && failProgressReadAfterNightReplacement) {
+                nightDao.armNextReadFailure()
+            }
+            return replaced
+        }
 
         override fun readSessionTranscript(sessionId: String): SessionTranscriptWithSegments? =
             transcripts[sessionId]?.let { transcript ->
@@ -1023,6 +1116,7 @@ class NightTranscriptionCoordinatorTest {
             contentStartSample: Long = startSample,
             triggeringWakePhrase: TriggeringWakePhrase? = null,
             openingRecoveryFloorSample: Long? = null,
+            observedNonSpeechRanges: List<SessionNonSpeechRange> = emptyList(),
         ) = TranscriptionInput(
             acousticRange = Pcm16WavSource.RecognitionRange(
                 startSample = startSample,
@@ -1031,6 +1125,7 @@ class NightTranscriptionCoordinatorTest {
             contentStartSample = contentStartSample,
             triggeringWakePhrase = triggeringWakePhrase,
             openingRecoveryFloorSample = openingRecoveryFloorSample,
+            observedNonSpeechRanges = observedNonSpeechRanges,
         )
 
         fun sessionStartedEvent(sessionId: String, phrase: String) = NightEventEntity(

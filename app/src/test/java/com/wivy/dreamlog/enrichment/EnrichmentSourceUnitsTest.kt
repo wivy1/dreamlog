@@ -99,6 +99,40 @@ class EnrichmentSourceUnitsTest {
     }
 
     @Test
+    fun backwardDreamIntroductionStartsANewDreamUnitWithoutBroadBeforeMatching() {
+        val words = listOf(
+            "before",
+            "and", "i", "had", "another", "dream", "before", "this",
+            "i", "stood", "inside", "a", "greenhouse",
+        )
+        val input = transcript(words.mapIndexed { index, word -> segment(index = index, text = word) })
+
+        val units = input.toEnrichmentSourceUnits()
+
+        assertEquals(listOf(1, 12), units.map { it.segments.size })
+        assertEquals(listOf(EnrichmentCue.NONE, EnrichmentCue.NEW_DREAM), units.map {
+            it.cue
+        })
+        assertEquals(
+            "and i had another dream before this i stood inside a greenhouse",
+            units[1].text,
+        )
+        assertExactCoverage(input, units)
+        assertEquals(
+            EnrichmentCue.NEW_DREAM,
+            classifyEnrichmentCue("There was a dream before that near a harbor"),
+        )
+        assertEquals(
+            EnrichmentCue.NONE,
+            classifyEnrichmentCue("The hallway was dark before that door opened"),
+        )
+        assertEquals(
+            EnrichmentCue.NONE,
+            classifyEnrichmentCue("Before that I entered another room"),
+        )
+    }
+
+    @Test
     fun oversizedAtomicSegmentsRemainWholeAndDoNotExpandAdjacentUnits() {
         val tooManyWords = (0 until 17).joinToString(separator = " ") { "large$it" }
         val tooManyCharacters = "x".repeat(201)

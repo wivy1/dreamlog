@@ -32,8 +32,11 @@ import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 
-internal fun persistedEnrichmentFailureIsRetryable(detail: String?): Boolean =
-    detail?.let { PERSISTED_RETRYABLE.find(it)?.groupValues?.get(1) == "true" } == true
+internal fun persistedEnrichmentFailureIsRetryable(detail: String?): Boolean = detail?.let {
+    PERSISTED_RETRYABLE.find(it)?.let { marker ->
+        marker.groupValues[2] == "true" || marker.groupValues[1] == LEGACY_OVERSIZE_CODE
+    }
+} == true
 
 internal fun persistedEnrichmentFailureDisplayDetail(detail: String?): String? =
     detail
@@ -42,8 +45,9 @@ internal fun persistedEnrichmentFailureDisplayDetail(detail: String?): String? =
         ?.ifBlank { null }
 
 private val PERSISTED_RETRYABLE = Regex(
-    "\\[code=[a-z0-9_]+; retryable=(true|false)]$",
+    "\\[code=([a-z0-9_]+); retryable=(true|false)]$",
 )
+private const val LEGACY_OVERSIZE_CODE = "input_too_large"
 
 /**
  * Room-backed boundary between immutable M04 transcript evidence and M05 generated readings.

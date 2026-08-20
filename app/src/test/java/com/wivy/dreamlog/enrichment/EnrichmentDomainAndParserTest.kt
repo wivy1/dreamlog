@@ -58,7 +58,7 @@ class EnrichmentDomainAndParserTest {
 
         val request = EnrichmentPromptBuilder.build(first, attempt = 3)
         assertEquals(6, ENRICHMENT_SCHEMA_VERSION)
-        assertEquals("16", ENRICHMENT_PROMPT_VERSION)
+        assertEquals("18", ENRICHMENT_PROMPT_VERSION)
         assertTrue(EnrichmentPromptBuilder.responseContractDescription.contains("\"parts\""))
         assertTrue(EnrichmentPromptBuilder.responseContractDescription.contains("\"dream\""))
         assertTrue(EnrichmentPromptBuilder.responseContractDescription.contains("JSON boolean"))
@@ -73,6 +73,9 @@ class EnrichmentDomainAndParserTest {
         )
         assertTrue(request.systemInstruction.contains("contiguous, nonoverlapping parts"))
         assertTrue(request.systemInstruction.contains("Do not copy transcript text"))
+        assertTrue(request.systemInstruction.contains("Labels follow first mention, not event chronology"))
+        assertTrue(request.systemInstruction.contains("Both sides of an explicit new-dream boundary"))
+        assertTrue(request.systemInstruction.contains("uncertainty alone does not make a Dream a fragment"))
         assertEquals(
             "Allowed aliases in exact order: s0, s1. Use no other alias. Cover this entire " +
                 "list exactly once.\n" +
@@ -134,6 +137,116 @@ class EnrichmentDomainAndParserTest {
             ),
         )
         assertTrue(content.contains("s1 cue=new-dream"))
+    }
+
+    @Test
+    fun backwardDreamIntroductionIsMandatoryAndRepairsAMergedModelPart() {
+        val source = input(
+            segment(
+                "session-a",
+                0,
+                0,
+                0L,
+                100L,
+                "I WALKED THROUGH A GLASS GREENHOUSE",
+            ),
+            segment(
+                "session-a",
+                0,
+                1,
+                100L,
+                200L,
+                "I HAD ANOTHER DREAM BEFORE THIS I SAILED PAST AN ISLAND",
+            ),
+        )
+
+        val request = EnrichmentPromptBuilder.build(source, 1)
+        assertTrue(
+            request.userContent.contains(
+                "Required semantic part starts: s1. Each of these aliases must be the start " +
+                    "of a separate part.",
+            ),
+        )
+        assertTrue(request.userContent.contains("s1 cue=new-dream"))
+
+        val result = parse(
+            source,
+            dream(
+                label = "d0",
+                kind = EnrichedDreamKind.FRAGMENT,
+                uncertain = true,
+                start = "s0",
+                end = "s1",
+            ),
+        )
+
+        assertEquals(1, source.capturePartitions().size)
+        assertEquals(2, result.dreams.size)
+        assertEquals(
+            listOf(EnrichedDreamKind.DREAM, EnrichedDreamKind.DREAM),
+            result.dreams.map(EnrichedDreamDraft::kind),
+        )
+        assertEquals(listOf(true, true), result.dreams.map(EnrichedDreamDraft::uncertain))
+        assertEquals(
+            listOf(listOf(0), listOf(1)),
+            result.dreams.map { dream ->
+                dream.sourceSpans.single().segmentIds.map(SourceSegmentId::segmentIndex)
+            },
+        )
+        val observedIds = result.dreams
+            .flatMap(EnrichedDreamDraft::sourceSpans)
+            .flatMap(EnrichedSourceSpan::segmentIds)
+        assertEquals(source.segments.map(NightTranscriptSegment::id).toSet(), observedIds.toSet())
+        assertEquals(source.segments.size, observedIds.size)
+        assertEquals(source.segments.size, observedIds.distinct().size)
+        assertEquals(
+            source.segments.flatMap { supportedWords(it.text) }.sorted(),
+            result.dreams.flatMap { supportedWords(it.generatedText) }.sorted(),
+        )
+    }
+
+    @Test
+    fun explicitDreamBoundaryDoesNotPromoteIndependentlyIncompleteRecall() {
+        val source = input(
+            segment(
+                "session-a",
+                0,
+                0,
+                0L,
+                100L,
+                "I CANNOT REMEMBER THE REST",
+            ),
+            segment(
+                "session-a",
+                0,
+                1,
+                100L,
+                200L,
+                "MY NEXT DREAM WAS BESIDE A HARBOR",
+            ),
+        )
+
+        val result = parse(
+            source,
+            dream(
+                label = "d0",
+                kind = EnrichedDreamKind.FRAGMENT,
+                uncertain = false,
+                start = "s0",
+                end = "s1",
+            ),
+        )
+
+        assertEquals(
+            listOf(EnrichedDreamKind.FRAGMENT, EnrichedDreamKind.DREAM),
+            result.dreams.map(EnrichedDreamDraft::kind),
+        )
+        assertEquals(listOf(true, false), result.dreams.map(EnrichedDreamDraft::uncertain))
+        assertEquals(
+            source.segments.map(NightTranscriptSegment::id),
+            result.dreams.flatMap(EnrichedDreamDraft::sourceSpans)
+                .flatMap(EnrichedSourceSpan::segmentIds),
+        )
     }
 
     @Test
@@ -425,7 +538,7 @@ class EnrichmentDomainAndParserTest {
         assertFalse(result.dreams[0].uncertain)
         assertEquals(EnrichedDreamKind.FRAGMENT, result.dreams[1].kind)
         assertTrue(result.dreams[1].uncertain)
-        assertEquals(EnrichedDreamKind.FRAGMENT, result.dreams[2].kind)
+        assertEquals(EnrichedDreamKind.DREAM, result.dreams[2].kind)
         assertTrue(result.dreams[2].uncertain)
     }
 

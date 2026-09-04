@@ -1,16 +1,20 @@
 package com.wivy.dreamlog
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -53,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
@@ -65,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.wivy.dreamlog.capture.AndroidPreflight
@@ -87,6 +93,7 @@ import com.wivy.dreamlog.capture.PreflightEvaluation
 import com.wivy.dreamlog.capture.SessionAudioWriter
 import com.wivy.dreamlog.capture.SessionIncompleteReason
 import com.wivy.dreamlog.capture.UnreadableActiveJournalException
+import com.wivy.dreamlog.enrichment.EnrichmentInterruptionCause
 import com.wivy.dreamlog.enrichment.EnrichmentModelPhase
 import com.wivy.dreamlog.enrichment.EnrichmentRuntimePhase
 import com.wivy.dreamlog.enrichment.EnrichmentRuntimeSnapshot
@@ -94,6 +101,7 @@ import com.wivy.dreamlog.enrichment.EnrichmentRuntimeStore
 import com.wivy.dreamlog.enrichment.NightTranscriptSegment
 import com.wivy.dreamlog.enrichment.OrderedNightTranscript
 import com.wivy.dreamlog.enrichment.persistence.persistedEnrichmentFailureIsRetryable
+import com.wivy.dreamlog.enrichment.persistence.persistedEnrichmentFailureDisplayDetail
 import com.wivy.dreamlog.export.AndroidExportStore
 import com.wivy.dreamlog.export.DreamLogExportDocument
 import com.wivy.dreamlog.export.DreamLogExportFormat
@@ -106,6 +114,7 @@ import com.wivy.dreamlog.history.AudioEvidenceState
 import com.wivy.dreamlog.history.HistoryLoadResult
 import com.wivy.dreamlog.history.HistoryFormatters
 import com.wivy.dreamlog.history.NightCaptureState
+import com.wivy.dreamlog.history.NightAudioArtifactInspection
 import com.wivy.dreamlog.history.NightRecord
 import com.wivy.dreamlog.history.NightRepository
 import com.wivy.dreamlog.history.ProcessingState
@@ -198,6 +207,9 @@ class MainActivity : ComponentActivity() {
                     onSaveDream = ::saveDream,
                     onDeleteDream = ::deleteDream,
                     onRestoreDream = ::restoreDream,
+                    onMarkCaptureIssueReviewed = ::markCaptureIssueReviewed,
+                    onShowCaptureIssueAgain = ::showCaptureIssueAgain,
+                    onInspectNightAudio = ::inspectNightAudio,
                     onDeleteNightRawAudio = ::deleteNightRawAudio,
                     onDeleteWholeNight = ::deleteWholeNight,
                     onUpdateRawAudioRetention = ::updateRawAudioRetention,
@@ -212,6 +224,24 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshPreflight()
+    }
+
+    override fun onStop() {
+        if (
+            !isChangingConfigurations &&
+            EnrichmentRuntimeStore.snapshots.value.runtimePhase ==
+            EnrichmentRuntimePhase.RUNNING
+        ) {
+            val powerManager = getSystemService(PowerManager::class.java)
+            val keyguardManager = getSystemService(KeyguardManager::class.java)
+            EnrichmentRuntimeStore.requestForegroundInterruption(
+                enrichmentForegroundLossCause(
+                    screenInteractive = powerManager?.isInteractive ?: true,
+                    keyguardLocked = keyguardManager?.isKeyguardLocked ?: false,
+                ),
+            )
+        }
+        super.onStop()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -542,6 +572,80 @@ class MainActivity : ComponentActivity() {
     ) = runArchiveMutation("DreamLog-restore-dream", onComplete) {
         check(nightRepository.restoreDream(dreamId)) {
             "The dream is no longer deleted."
+        }
+    }
+
+    private fun markCaptureIssueReviewed(
+        nightId: String,
+        onComplete: (String?) -> Unit,
+    ) = runArchiveMutation("DreamLog-mark-capture-issue-reviewed", onComplete) {
+        check(nightRepository.markCaptureIssueReviewed(nightId)) {
+            "The capture issue is no longer present or was already reviewed."
+        }
+    }
+
+    private fun showCaptureIssueAgain(
+        nightId: String,
+        onComplete: (String?) -> Unit,
+    ) = runArchiveMutation("DreamLog-show-capture-issue-again", onComplete) {
+        check(nightRepository.showCaptureIssueAgain(nightId)) {
+            "The capture issue is already shown or the night is no longer present."
+        }
+    }
+
+    private fun inspectNightAudio(
+        nightId: String,
+        onComplete: (NightAudioArtifactInspection?, String?) -> Unit,
+    ) {
+        if (archiveMutationRunning) {
+            onComplete(null, "Another archive action is still finishing.")
+            return
+        }
+        if (
+            !CaptureTranscriptionOperationGate.tryClaimLocalOperation {
+                CaptureRuntimeStore.snapshots.value.active
+            }
+        ) {
+            onComplete(
+                null,
+                "Finish night listening or the current local processing task before checking " +
+                    "saved audio.",
+            )
+            return
+        }
+        archiveMutationRunning = true
+        val launchFailure = runCatching {
+            Thread(
+                {
+                    val result = try {
+                        runCatching { nightRepository.inspectEndedNightAudio(nightId) }
+                    } finally {
+                        CaptureTranscriptionOperationGate.releaseLocalOperation()
+                    }
+                    runOnUiThread {
+                        archiveMutationRunning = false
+                        result.fold(
+                            onSuccess = { inspection -> onComplete(inspection, null) },
+                            onFailure = { failure ->
+                                onComplete(
+                                    null,
+                                    failure.message
+                                        ?: "The saved-audio check could not be completed.",
+                                )
+                            },
+                        )
+                    }
+                },
+                "DreamLog-inspect-night-audio",
+            ).start()
+        }.exceptionOrNull()
+        if (launchFailure != null) {
+            CaptureTranscriptionOperationGate.releaseLocalOperation()
+            archiveMutationRunning = false
+            onComplete(
+                null,
+                launchFailure.message ?: "The saved-audio check could not be started.",
+            )
         }
     }
 
@@ -1209,6 +1313,36 @@ internal fun shouldKeepScreenOnForLocalProcessing(
     enrichmentPhase: EnrichmentRuntimePhase,
 ): Boolean = enrichmentPhase == EnrichmentRuntimePhase.RUNNING
 
+internal fun enrichmentForegroundLossCause(
+    screenInteractive: Boolean,
+    keyguardLocked: Boolean,
+): EnrichmentInterruptionCause = if (!screenInteractive || keyguardLocked) {
+    EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED
+} else {
+    EnrichmentInterruptionCause.APP_HIDDEN
+}
+
+internal fun canStartNightInstead(
+    morningAction: HomeMorningAction?,
+    startEnabled: Boolean,
+): Boolean = morningAction?.kind == HomeNextActionKind.ENRICH && startEnabled
+
+private fun enrichmentInterruptionMessage(
+    cause: EnrichmentInterruptionCause,
+): String = when (cause) {
+    EnrichmentInterruptionCause.APP_HIDDEN ->
+        "DreamLog was hidden, so enrichment is stopping. Completed local work was kept; " +
+            "unfinished work will remain ready to retry."
+
+    EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED ->
+        "The phone was locked or its screen turned off, so enrichment is stopping. Completed " +
+            "local work was kept; unfinished work will remain ready to retry."
+
+    EnrichmentInterruptionCause.USER_CANCELLED ->
+        "You chose to leave, so enrichment is stopping. Completed local work was kept; " +
+            "unfinished work will remain ready to retry."
+}
+
 internal fun nightReprocessGlobalUnavailableReason(
     captureActive: Boolean,
     archiveMutationRunning: Boolean,
@@ -1295,6 +1429,12 @@ private fun DreamLogApp(
     onSaveDream: (String, String?, String, (String?) -> Unit) -> Unit,
     onDeleteDream: (String, (String?) -> Unit) -> Unit,
     onRestoreDream: (String, (String?) -> Unit) -> Unit,
+    onMarkCaptureIssueReviewed: (String, (String?) -> Unit) -> Unit,
+    onShowCaptureIssueAgain: (String, (String?) -> Unit) -> Unit,
+    onInspectNightAudio: (
+        String,
+        (NightAudioArtifactInspection?, String?) -> Unit,
+    ) -> Unit,
     onDeleteNightRawAudio: (String, (String?) -> Unit) -> Unit,
     onDeleteWholeNight: (String, (String?) -> Unit) -> Unit,
     onUpdateRawAudioRetention: (Int, (String?) -> Unit) -> Unit,
@@ -1307,10 +1447,13 @@ private fun DreamLogApp(
     onSaveExport: (DreamLogExportDocument, Uri, (String?) -> Unit) -> Unit,
 ) {
     val navController = rememberNavController()
+    val currentBackStackEntry by navController.currentBackStackEntryAsState()
     val runtime by CaptureRuntimeStore.snapshots.collectAsState()
     val transcriptionRuntime by TranscriptionRuntimeStore.snapshots.collectAsState()
     val enrichmentRuntime by EnrichmentRuntimeStore.snapshots.collectAsState()
     val rootView = LocalView.current
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var showLeaveEnrichmentConfirmation by rememberSaveable { mutableStateOf(false) }
     var reprocessNightId by rememberSaveable { mutableStateOf<String?>(null) }
     var reprocessPhaseName by rememberSaveable {
         mutableStateOf(NightReprocessPhase.IDLE.name)
@@ -1343,6 +1486,49 @@ private fun DreamLogApp(
         val priorKeepScreenOn = rootView.keepScreenOn
         rootView.keepScreenOn = keepScreenOnForLocalProcessing
         onDispose { rootView.keepScreenOn = priorKeepScreenOn }
+    }
+
+    BackHandler(
+        enabled = currentBackStackEntry?.destination?.route == HOME_ROUTE &&
+            enrichmentRuntime.runtimePhase == EnrichmentRuntimePhase.RUNNING,
+    ) {
+        showLeaveEnrichmentConfirmation = true
+    }
+    if (showLeaveEnrichmentConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showLeaveEnrichmentConfirmation = false },
+            title = { Text("Stop local enrichment?") },
+            text = {
+                Text(
+                    "Leaving DreamLog will stop this local enrichment batch. Completed local " +
+                        "work remains saved; unfinished and unstarted nights can be retried. " +
+                        "Keep DreamLog visible and unlocked to continue instead.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showLeaveEnrichmentConfirmation = false
+                        EnrichmentRuntimeStore.requestForegroundInterruption(
+                            EnrichmentInterruptionCause.USER_CANCELLED,
+                        )
+                        (context as? ComponentActivity)?.finish()
+                    },
+                ) {
+                    Text("Leave and stop")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLeaveEnrichmentConfirmation = false }) {
+                    Text("Keep working")
+                }
+            },
+        )
+    }
+    LaunchedEffect(enrichmentRuntime.runtimePhase) {
+        if (enrichmentRuntime.runtimePhase != EnrichmentRuntimePhase.RUNNING) {
+            showLeaveEnrichmentConfirmation = false
+        }
     }
     val automaticTranscriptionNightId = historyUiState.nights.firstOrNull { record ->
         record.night.captureState in setOf(
@@ -1627,6 +1813,9 @@ private fun DreamLogApp(
                         }
                     }
                 },
+                onMarkCaptureIssueReviewed = onMarkCaptureIssueReviewed,
+                onShowCaptureIssueAgain = onShowCaptureIssueAgain,
+                onInspectNightAudio = onInspectNightAudio,
                 onDeleteNightRawAudio = onDeleteNightRawAudio,
                 onExportNight = { selectedNightId ->
                     settingsExportNightId = selectedNightId
@@ -1862,6 +2051,155 @@ private fun DreamLogScreen(
         enrichmentRuntime = enrichmentRuntime,
         readyEnrichmentRecords = readyEnrichmentRecords,
     )
+    val primaryActionContent: @Composable () -> Unit = {
+        HomePrimaryActionCard(
+            runtime = runtime,
+            morningAction = morningAction,
+            startEnabled = startEnabled,
+            setupNeedsAttention = setupNeedsAttention,
+            startBlockedMessage = startBlockedMessage,
+            actionMessage = actionMessage,
+            onStartNight = startNight,
+            onEndNight = {
+                actionMessage = runCatching {
+                    NightListeningService.endNight(context)
+                    null
+                }.getOrElse { failure ->
+                    failure.message ?: "DreamLog could not request night end."
+                }
+            },
+            onMorningAction = { action ->
+                when (action.kind) {
+                    HomeNextActionKind.RESUME_TRANSCRIPTION -> {
+                        if (action.requiresSettings) {
+                            onOpenSettings()
+                        } else {
+                            val nightId = action.nightId
+                            if (nightId != null) {
+                                TranscriptionRuntimeStore.resumeNight(nightId)
+                            }
+                        }
+                    }
+
+                    HomeNextActionKind.ENRICH -> {
+                        if (action.requiresSettings) {
+                            onOpenSettings()
+                        } else if (
+                            !runtime.active &&
+                            !transcriptionRuntime.busy &&
+                            !enrichmentRuntime.busy
+                        ) {
+                            EnrichmentRuntimeStore.processNights(
+                                readyEnrichmentRecords
+                                    .map { it.night.nightId }
+                                    .distinct(),
+                            )
+                        }
+                    }
+
+                    HomeNextActionKind.TRANSCRIBING,
+                    HomeNextActionKind.ENRICHING,
+                    -> Unit
+                }
+            },
+        )
+
+    }
+    val showSetupSection =
+        !runtime.active &&
+            (
+                morningAction == null ||
+                    (morningAction.kind == HomeNextActionKind.ENRICH &&
+                        !startEnabled &&
+                        setupNeedsAttention)
+                )
+    val setupToggleContent: @Composable () -> Unit = {
+        if (setupNeedsAttention) {
+            Button(
+                onClick = { setupDetailsExpanded = !setupDetailsExpanded },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (setupDetailsExpanded) "Hide setup" else "Resolve setup")
+            }
+        } else {
+            OutlinedButton(
+                onClick = { setupDetailsExpanded = !setupDetailsExpanded },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (setupDetailsExpanded) {
+                        "Hide setup details"
+                    } else {
+                        "Show setup details"
+                    },
+                )
+            }
+        }
+    }
+    val cueCheckContent: @Composable () -> Unit = {
+        CueCheckCard(
+            preflight = preflight,
+            cuePlayerAvailable = cuePlayerResult.isSuccess,
+            cuePreviewState = cuePreviewState,
+            onPreviewCue = {
+                val player = cuePlayerResult.getOrNull()
+                if (player == null) {
+                    cuePreviewState = CuePreviewState.FAILED
+                    actionMessage = cuePlayerResult.exceptionOrNull()?.message
+                        ?: "The local cue could not be prepared."
+                } else {
+                    cuePreviewState = CuePreviewState.PLAYING
+                    actionMessage = null
+                    runCatching {
+                        player.play(
+                            onFirstFrame = {
+                                cuePreviewState = CuePreviewState.PLAYING
+                            },
+                            onComplete = {
+                                cuePreviewState = CuePreviewState.PLAYED
+                                cueTestedThisVisit = true
+                                onRefreshPreflight()
+                            },
+                        )
+                    }.onFailure { failure ->
+                        cuePreviewState = CuePreviewState.FAILED
+                        actionMessage = failure.message
+                            ?: "The cue preview could not be played."
+                    }
+                }
+            },
+        )
+    }
+    val expandedSetupContent: @Composable ColumnScope.() -> Unit = {
+        requiredChecksContent()
+        DeferredStartChecksCard()
+        cueCheckContent()
+        WarningChecksCard(preflight)
+        recoveryUiState.recoverySummary?.let { summary ->
+            InformationCard(title = "Recovery", body = summary)
+        }
+    }
+    val homeControls: @Composable ColumnScope.() -> Unit = {
+        primaryActionContent()
+        if (showSetupSection) {
+            setupToggleContent()
+            if (setupDetailsExpanded) expandedSetupContent()
+        }
+    }
+    val historyContent: @Composable () -> Unit = {
+        NightHistorySection(
+            nights = historyUiState.nights,
+            loading = historyUiState.loading,
+            error = historyUiState.error,
+            warningCount = historyUiState.warningCount,
+            onOpenNight = onOpenNight,
+            onRetry = onReloadLatestResult,
+        )
+    }
+    val layoutMode = homeLayoutMode(
+        isLandscape = LocalConfiguration.current.orientation ==
+            Configuration.ORIENTATION_LANDSCAPE,
+    )
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -1898,139 +2236,43 @@ private fun DreamLogScreen(
                 }
             }
 
-            item {
-                HomePrimaryActionCard(
-                    runtime = runtime,
-                    morningAction = morningAction,
-                    startEnabled = startEnabled,
-                    setupNeedsAttention = setupNeedsAttention,
-                    startBlockedMessage = startBlockedMessage,
-                    actionMessage = actionMessage,
-                    onStartNight = startNight,
-                    onEndNight = {
-                        actionMessage = runCatching {
-                            NightListeningService.endNight(context)
-                            null
-                        }.getOrElse { failure ->
-                            failure.message ?: "DreamLog could not request night end."
-                        }
-                    },
-                    onMorningAction = { action ->
-                        when (action.kind) {
-                            HomeNextActionKind.RESUME_TRANSCRIPTION -> {
-                                if (action.requiresSettings) {
-                                    onOpenSettings()
-                                } else {
-                                    val nightId = action.nightId
-                                    if (nightId != null) {
-                                        TranscriptionRuntimeStore.resumeNight(nightId)
-                                    }
-                                }
+            when (layoutMode) {
+                HomeLayoutMode.SINGLE_COLUMN -> {
+                    item { primaryActionContent() }
+                    if (showSetupSection) {
+                        item { setupToggleContent() }
+                        if (setupDetailsExpanded) {
+                            item { requiredChecksContent() }
+                            item { DeferredStartChecksCard() }
+                            item { cueCheckContent() }
+                            item { WarningChecksCard(preflight) }
+                            recoveryUiState.recoverySummary?.let { summary ->
+                                item { InformationCard(title = "Recovery", body = summary) }
                             }
-
-                            HomeNextActionKind.ENRICH -> {
-                                if (action.requiresSettings) {
-                                    onOpenSettings()
-                                } else if (
-                                    !runtime.active &&
-                                    !transcriptionRuntime.busy &&
-                                    !enrichmentRuntime.busy
-                                ) {
-                                    EnrichmentRuntimeStore.processNights(
-                                        readyEnrichmentRecords
-                                            .map { it.night.nightId }
-                                            .distinct(),
-                                    )
-                                }
-                            }
-
-                            HomeNextActionKind.TRANSCRIBING,
-                            HomeNextActionKind.ENRICHING,
-                            -> Unit
-                        }
-                    },
-                )
-            }
-
-            if (!runtime.active && morningAction == null) {
-                item {
-                    if (setupNeedsAttention) {
-                        Button(
-                            onClick = { setupDetailsExpanded = !setupDetailsExpanded },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(if (setupDetailsExpanded) "Hide setup" else "Resolve setup")
-                        }
-                    } else {
-                        OutlinedButton(
-                            onClick = { setupDetailsExpanded = !setupDetailsExpanded },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                if (setupDetailsExpanded) {
-                                    "Hide setup details"
-                                } else {
-                                    "Show setup details"
-                                },
-                            )
                         }
                     }
+                    item { historyContent() }
                 }
-                if (setupDetailsExpanded) {
-                    item { requiredChecksContent() }
-                    item { DeferredStartChecksCard() }
+
+                HomeLayoutMode.TWO_COLUMN -> {
                     item {
-                        CueCheckCard(
-                            preflight = preflight,
-                            cuePlayerAvailable = cuePlayerResult.isSuccess,
-                            cuePreviewState = cuePreviewState,
-                            onPreviewCue = {
-                                val player = cuePlayerResult.getOrNull()
-                                if (player == null) {
-                                    cuePreviewState = CuePreviewState.FAILED
-                                    actionMessage = cuePlayerResult.exceptionOrNull()?.message
-                                        ?: "The local cue could not be prepared."
-                                } else {
-                                    cuePreviewState = CuePreviewState.PLAYING
-                                    actionMessage = null
-                                    runCatching {
-                                        player.play(
-                                            onFirstFrame = {
-                                                cuePreviewState = CuePreviewState.PLAYING
-                                            },
-                                            onComplete = {
-                                                cuePreviewState = CuePreviewState.PLAYED
-                                                cueTestedThisVisit = true
-                                                onRefreshPreflight()
-                                            },
-                                        )
-                                    }.onFailure { failure ->
-                                        cuePreviewState = CuePreviewState.FAILED
-                                        actionMessage = failure.message
-                                            ?: "The cue preview could not be played."
-                                    }
-                                }
-                            },
-                        )
-                    }
-                    item { WarningChecksCard(preflight) }
-                    recoveryUiState.recoverySummary?.let { summary ->
-                        item { InformationCard(title = "Recovery", body = summary) }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(16.dp),
+                                content = homeControls,
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                historyContent()
+                            }
+                        }
                     }
                 }
             }
-
-            item {
-                NightHistorySection(
-                    nights = historyUiState.nights,
-                    loading = historyUiState.loading,
-                    error = historyUiState.error,
-                    warningCount = historyUiState.warningCount,
-                    onOpenNight = onOpenNight,
-                    onRetry = onReloadLatestResult,
-                )
-            }
-
         }
     }
 }
@@ -2933,8 +3175,8 @@ private fun TranscriptionRuntimeSnapshot.messageForNight(selectedNightId: String
         transcriptionPhase == TranscriptionRuntimePhase.RUNNING &&
         nightId != selectedNightId
     ) {
-        return "Another night is being transcribed locally. It may continue with the screen off; " +
-            "use the ongoing notification to follow progress."
+        return "Another night is being transcribed locally. Switching apps or locking the phone " +
+            "is supported; use the ongoing notification to follow progress."
     }
     if (nightId != selectedNightId) return null
     return transcriptionError ?: if (eligibleSessionCount > 0) {
@@ -2969,6 +3211,14 @@ internal enum class HomeNextActionKind {
     ENRICH,
     ENRICHING,
 }
+
+internal enum class HomeLayoutMode {
+    SINGLE_COLUMN,
+    TWO_COLUMN,
+}
+
+internal fun homeLayoutMode(isLandscape: Boolean): HomeLayoutMode =
+    if (isLandscape) HomeLayoutMode.TWO_COLUMN else HomeLayoutMode.SINGLE_COLUMN
 
 internal const val HOME_PRIMARY_ACTION_HEIGHT_DP = 152
 
@@ -3023,8 +3273,8 @@ internal fun homeMorningAction(
         return HomeMorningAction(
             kind = HomeNextActionKind.TRANSCRIBING,
             title = "Transcribing $completedSessionCount/$totalSessionCount",
-            body = "Transcription may continue with the screen off. Use the ongoing notification " +
-                "to follow progress.",
+            body = "Switching apps or locking the phone is supported while transcription " +
+                "continues. Use the ongoing notification to follow progress.",
             nightId = transcriptionRuntime.nightId ?: record?.night?.nightId,
         )
     }
@@ -3032,8 +3282,15 @@ internal fun homeMorningAction(
     if (enrichmentRuntime.runtimePhase == EnrichmentRuntimePhase.RUNNING) {
         return HomeMorningAction(
             kind = HomeNextActionKind.ENRICHING,
-            title = "Enriching dreams",
-            body = "Keep DreamLog open while generated dreams are prepared locally.",
+            title = if (enrichmentRuntime.interruptionCause == null) {
+                "Enriching dreams"
+            } else {
+                "Stopping enrichment"
+            },
+            body = enrichmentRuntime.interruptionCause?.let(::enrichmentInterruptionMessage)
+                ?: "DreamLog is keeping the screen awake while local enrichment runs. Keep " +
+                    "this screen visible and unlocked; switching apps, removing DreamLog from " +
+                    "Recents, or manually locking the phone stops enrichment.",
             nightId = enrichmentRuntime.nightId ?: record?.night?.nightId,
         )
     }
@@ -3084,24 +3341,50 @@ internal fun homeMorningAction(
         )
     }
 
-    if (readyEnrichmentRecords.any { it.night.nightId == record.night.nightId }) {
+    val enrichmentRecord = readyEnrichmentRecords.firstOrNull()
+    if (enrichmentRecord != null) {
         val modelReady = enrichmentRuntime.modelPhase == EnrichmentModelPhase.INSTALLED ||
-            record.hasGenuinelyEmptyEnrichmentSource()
+            enrichmentRecord.hasGenuinelyEmptyEnrichmentSource()
         return HomeMorningAction(
             kind = HomeNextActionKind.ENRICH,
             title = "Ready to enrich",
-            body = if (record.night.enrichmentState == ProcessingState.FAILED) {
-                "Dream generation stopped. The completed transcript was kept; choose Enrich to retry."
+            body = if (enrichmentRecord.night.enrichmentState == ProcessingState.FAILED) {
+                val safeDetail = persistedEnrichmentFailureDisplayDetail(
+                    enrichmentRecord.night.enrichmentFailure,
+                )
+                if (
+                    persistedEnrichmentFailureIsRetryable(
+                        enrichmentRecord.night.enrichmentFailure,
+                    )
+                ) {
+                    buildString {
+                        append("Enrichment stopped")
+                        if (safeDetail == null) {
+                            append('.')
+                        } else {
+                            append(": $safeDetail")
+                            if (safeDetail.last() !in ".!?") append('.')
+                        }
+                        append(" The completed transcript was kept; choose Enrich to retry.")
+                    }
+                } else {
+                    "Dream generation stopped. This failure cannot be retried from Home."
+                }
+            } else if (enrichmentRuntime.runtimeError != null) {
+                "${enrichmentRuntime.runtimeError} Unstarted nights remain ready; choose " +
+                    "Enrich to retry when convenient."
             } else {
                 "Transcription is complete. Generate this night's dream grouping on this device."
             },
             buttonLabel = if (modelReady) "Enrich" else "Set up enrichment",
-            nightId = record.night.nightId,
+            nightId = enrichmentRecord.night.nightId,
             requiresSettings = !modelReady,
             enabled = !modelReady ||
                 (!transcriptionRuntime.busy && !enrichmentRuntime.busy),
-            detail = if (record.night.enrichmentState == ProcessingState.FAILED) {
-                record.night.enrichmentFailure
+            detail = if (enrichmentRecord.night.enrichmentState == ProcessingState.FAILED) {
+                persistedEnrichmentFailureDisplayDetail(
+                    enrichmentRecord.night.enrichmentFailure,
+                )
             } else {
                 null
             },
@@ -3126,8 +3409,13 @@ private fun HomePrimaryActionCard(
     var detailExpanded by remember(morningAction?.kind, morningAction?.nightId) {
         mutableStateOf(false)
     }
+    var showEnrichConfirmation by remember(morningAction?.kind, morningAction?.nightId) {
+        mutableStateOf(false)
+    }
     val actionableMorningAction = morningAction?.takeIf { it.buttonLabel != null }
     val active = runtime.active
+    val showStartNightInstead = !active && morningAction?.kind == HomeNextActionKind.ENRICH
+    val startNightInsteadEnabled = canStartNightInstead(morningAction, startEnabled)
     val title = homePrimaryStatusTitle(
         runtime = runtime,
         morningAction = morningAction,
@@ -3153,8 +3441,7 @@ private fun HomePrimaryActionCard(
         else -> "Start while DreamLog is visible, wait for Listening, then lock the phone."
     }
     val errorTone = runtime.microphoneSilenced ||
-        (morningAction?.detail != null &&
-            morningAction.kind == HomeNextActionKind.RESUME_TRANSCRIPTION) ||
+        morningAction?.detail != null ||
         actionMessage != null
 
     Card(
@@ -3211,7 +3498,16 @@ private fun HomePrimaryActionCard(
                 }
 
                 actionableMorningAction != null -> Button(
-                    onClick = { onMorningAction(actionableMorningAction) },
+                    onClick = {
+                        if (
+                            actionableMorningAction.kind == HomeNextActionKind.ENRICH &&
+                                !actionableMorningAction.requiresSettings
+                        ) {
+                            showEnrichConfirmation = true
+                        } else {
+                            onMorningAction(actionableMorningAction)
+                        }
+                    },
                     enabled = actionableMorningAction.enabled,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -3240,6 +3536,24 @@ private fun HomePrimaryActionCard(
                     )
                 }
             }
+            if (showStartNightInstead) {
+                TextButton(
+                    onClick = onStartNight,
+                    enabled = startNightInsteadEnabled,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Start night instead")
+                }
+                if (!startNightInsteadEnabled && setupNeedsAttention) {
+                    Text(
+                        text = "Resolve setup below before starting a new night.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
             morningAction?.detail?.let { detail ->
                 OutlinedButton(
                     onClick = { detailExpanded = !detailExpanded },
@@ -3256,6 +3570,36 @@ private fun HomePrimaryActionCard(
                 }
             }
         }
+    }
+
+    if (showEnrichConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showEnrichConfirmation = false },
+            title = { Text("Enrich pending nights?") },
+            text = {
+                Text(
+                    "DreamLog keeps the screen awake automatically while local enrichment runs. " +
+                        "Keep DreamLog visible and unlocked. Switching apps, removing it from " +
+                        "Recents, or manually locking the phone stops the batch; completed work " +
+                        "and raw transcripts remain safe to retry.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showEnrichConfirmation = false
+                        actionableMorningAction?.let(onMorningAction)
+                    },
+                ) {
+                    Text("Enrich now")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEnrichConfirmation = false }) {
+                    Text("Not now")
+                }
+            },
+        )
     }
 }
 

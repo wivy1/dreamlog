@@ -21,7 +21,7 @@ class SherpaParakeetTranscriptionEngineTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
-    fun productionConfigurationPinsVersionTwelveParakeetGreedyDecoder() {
+    fun productionConfigurationPinsVersionThirteenParakeetGreedyDecoder() {
         val model = InstalledLocalAsrModel(
             directory = temporaryFolder.newFolder("model"),
             revision = "model-revision",
@@ -41,7 +41,7 @@ class SherpaParakeetTranscriptionEngineTest {
         assertEquals("greedy_search", config.decodingMethod)
         assertEquals(4, config.maxActivePaths)
         assertEquals(0f, config.blankPenalty)
-        assertEquals("12", metadata.engineVersion)
+        assertEquals("13", metadata.engineVersion)
         assertEquals("model-revision", metadata.modelVersion)
         assertEquals("a".repeat(64), metadata.modelSha256)
     }
@@ -169,6 +169,65 @@ class SherpaParakeetTranscriptionEngineTest {
         assertEquals("SO", result.segments.first().text)
         assertEquals(listOf("DREAM", "LOG"), result.segments.takeLast(2).map { it.text })
         assertEquals(3_000L, result.segments.last().sourceEndMillis)
+    }
+
+    @Test
+    fun repeatedWakeAttemptsUseTheLastEventGroundedPhraseAndKeepTheOpening() {
+        val recognizer = RecordingRecognizer(
+            recognition = SherpaRecognition(
+                text = "DREAM LOG DREAM LOG THE BEGINNING",
+                tokens = listOf(" DREAM", " LOG", " DREAM", " LOG", " THE", " BEGINNING"),
+                timestampsSeconds = listOf(0.2f, 0.4f, 1.0f, 1.2f, 1.4f, 1.8f),
+            ),
+        )
+        val engine = SherpaParakeetTranscriptionEngine.forTesting(recognizer)
+
+        val result = engine.transcribe(
+            audioFile = wav(ShortArray(48_000)),
+            input = TranscriptionInput(
+                acousticRange = Pcm16WavSource.RecognitionRange(0L, 48_000L),
+                contentStartSample = 32_000L,
+                triggeringWakePhrase = TriggeringWakePhrase.DREAM_LOG,
+                triggerReportSample = 24_000L,
+            ),
+        )
+
+        assertEquals("THE BEGINNING", result.rawText)
+        assertEquals(listOf("THE", "BEGINNING"), result.segments.map { it.text })
+        assertEquals(1_400L, result.segments.first().sourceStartMillis)
+    }
+
+    @Test
+    fun fortyFiveSecondRetentionRoutesTheWakeMarkerToItsBoundedDecodeWindow() {
+        val recognizer = RecordingRecognizer(
+            recognitions = listOf(
+                SherpaRecognition(
+                    text = "OLDER SPEECH",
+                    tokens = listOf(" OLDER", " SPEECH"),
+                    timestampsSeconds = listOf(1f, 2f),
+                ),
+                SherpaRecognition(
+                    text = "DREAM LOG THE OPENING",
+                    tokens = listOf(" DREAM", " LOG", " THE", " OPENING"),
+                    timestampsSeconds = listOf(14.5f, 14.8f, 15.1f, 15.4f),
+                ),
+            ),
+        )
+        val engine = SherpaParakeetTranscriptionEngine.forTesting(recognizer)
+
+        val result = engine.transcribe(
+            audioFile = wav(ShortArray(800_000)),
+            input = TranscriptionInput(
+                acousticRange = Pcm16WavSource.RecognitionRange(0L, 800_000L),
+                contentStartSample = 728_000L,
+                triggeringWakePhrase = TriggeringWakePhrase.DREAM_LOG,
+                triggerReportSample = 720_000L,
+            ),
+        )
+
+        assertEquals(listOf(480_000, 320_000), recognizer.calls.map { it.samples.size })
+        assertEquals("THE OPENING", result.rawText)
+        assertEquals(45_100L, result.segments.first().sourceStartMillis)
     }
 
     @Test

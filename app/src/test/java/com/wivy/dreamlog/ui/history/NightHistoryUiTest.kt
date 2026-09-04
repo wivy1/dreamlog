@@ -2,6 +2,7 @@ package com.wivy.dreamlog.ui.history
 
 import com.wivy.dreamlog.capture.SessionIncompleteReason
 import com.wivy.dreamlog.history.AudioEvidenceState
+import com.wivy.dreamlog.history.CaptureIssueFingerprint
 import com.wivy.dreamlog.history.CaptureSessionEntity
 import com.wivy.dreamlog.history.DreamEntity
 import com.wivy.dreamlog.history.DreamKind
@@ -10,6 +11,7 @@ import com.wivy.dreamlog.history.DreamSourceRole
 import com.wivy.dreamlog.history.DreamSourceSpanEntity
 import com.wivy.dreamlog.history.HistoryFormatters
 import com.wivy.dreamlog.history.NightCaptureState
+import com.wivy.dreamlog.history.NightAudioArtifactInspection
 import com.wivy.dreamlog.history.NightEntity
 import com.wivy.dreamlog.history.NightEventEntity
 import com.wivy.dreamlog.history.NightRecord
@@ -29,16 +31,178 @@ import org.junit.Test
 
 class NightHistoryUiTest {
     @Test
+    fun savedAudioInspectionTextDistinguishesCleanAndRecoverableArtifacts() {
+        assertEquals(
+            "Saved audio check: all 4 recorded sessions have valid files. " +
+                "No additional finalized or partial audio was found.",
+            nightAudioInspectionText(
+                NightAudioArtifactInspection(
+                    directoryPresent = true,
+                    recordedSessionCount = 4,
+                    recordedFinalPresentCount = 4,
+                    recordedFinalValidCount = 4,
+                    extraFinalizedCandidateCount = 0,
+                    extraFinalizedOutsideNightCount = 0,
+                    extraUnverifiedFinalCount = 0,
+                    partialFileCount = 0,
+                    metadataOnlyCount = 0,
+                    metadataPartialCount = 0,
+                ),
+            ),
+        )
+        val candidate = nightAudioInspectionText(
+            NightAudioArtifactInspection(
+                directoryPresent = true,
+                recordedSessionCount = 2,
+                recordedFinalPresentCount = 2,
+                recordedFinalValidCount = 1,
+                extraFinalizedCandidateCount = 1,
+                extraFinalizedOutsideNightCount = 1,
+                extraUnverifiedFinalCount = 1,
+                partialFileCount = 1,
+                metadataOnlyCount = 1,
+                metadataPartialCount = 1,
+            ),
+        )
+
+        assertTrue(candidate.contains("1 of 2 recorded sessions has a valid file"))
+        assertTrue(candidate.contains("1 additional finalized recording for this night"))
+        assertTrue(candidate.contains("1 partial audio file"))
+        assertTrue(candidate.contains("1 finalized file could not be verified"))
+        assertTrue(candidate.contains("finalized recording is outside this night's time range"))
+        assertTrue(candidate.contains("1 metadata-only entry"))
+        assertTrue(candidate.contains("1 unfinished metadata entry"))
+        assertTrue(candidate.endsWith("No files were changed."))
+    }
+
+    @Test
+    fun savedAudioInspectionAvailabilityRequiresFinalizedNight() {
+        val ended = nightRecord()
+
+        assertTrue(canInspectNightAudio(ended))
+        assertTrue(
+            canInspectNightAudio(
+                ended.copy(
+                    night = ended.night.copy(captureState = NightCaptureState.INTERRUPTED),
+                ),
+            ),
+        )
+        listOf(
+            NightCaptureState.STARTING,
+            NightCaptureState.ACTIVE,
+            NightCaptureState.RECOVERY_REQUIRED,
+        ).forEach { state ->
+            assertFalse(
+                canInspectNightAudio(
+                    ended.copy(night = ended.night.copy(captureState = state)),
+                ),
+            )
+        }
+        assertFalse(
+            canInspectNightAudio(
+                ended.copy(night = ended.night.copy(endedAtEpochMillis = null)),
+            ),
+        )
+    }
+
+    @Test
     fun legacyOversizeFailureHidesMarkerAndShowsRetryInstructionAfterUpgrade() {
         val text = enrichmentProcessingText(
             ProcessingState.FAILED,
             "The whole-night transcript is too large. " +
+                "The raw transcript remains available to retry after an app update. " +
                 "[code=input_too_large; retryable=false]",
         )
 
-        assertTrue(text.contains("whole-night transcript"))
+        assertTrue(text.contains("previous enrichment path could not fit this night's transcript"))
+        assertFalse(text.contains("this capture"))
+        assertTrue(text.contains("context budget"))
+        assertFalse(text.contains("after an app update"))
         assertFalse(text.contains("[code="))
         assertTrue(text.contains("retry from this night"))
+    }
+
+    @Test
+    fun currentOversizeFailureHidesMarkerAndShowsRetryInstructionAfterUpgrade() {
+        val text = enrichmentProcessingText(
+            ProcessingState.FAILED,
+            "One capture exceeds this local model's context budget. " +
+                "The raw transcript remains available to retry after an app update. " +
+                "[code=capture_input_too_large; retryable=false]",
+        )
+
+        assertTrue(text.contains("previous enrichment path could not fit this night's transcript"))
+        assertFalse(text.contains("this capture"))
+        assertTrue(text.contains("context budget"))
+        assertFalse(text.contains("after an app update"))
+        assertFalse(text.contains("[code="))
+        assertTrue(text.contains("retry from this night"))
+    }
+
+    @Test
+    fun terminalEnrichmentFailureHidesMarkerAndDoesNotPromiseRetry() {
+        val text = enrichmentProcessingText(
+            ProcessingState.FAILED,
+            "The ordered raw transcript source is invalid. " +
+                "[code=invalid_source; retryable=false]",
+        )
+
+        assertTrue(text.contains("The ordered raw transcript source is invalid"))
+        assertFalse(text.contains("The raw transcript was preserved"))
+        assertFalse(text.contains("[code="))
+        assertFalse(text.contains("retry from this night"))
+    }
+
+    @Test
+    fun terminalSourceFailuresDescribeSourceAvailabilityInEnrichmentSummary() {
+        listOf(
+            "raw_source_unavailable" to "The raw transcript was not fully available",
+            "invalid_source" to "The ordered raw transcript source was invalid",
+        ).forEach { (code, expectedDetail) ->
+            val text = enrichmentProcessingText(
+                ProcessingState.FAILED,
+                "A source check failed. [code=$code; retryable=false]",
+            )
+
+            assertTrue(text.contains(expectedDetail))
+            assertFalse(text.contains("The raw transcript was preserved"))
+            assertFalse(text.contains("[code="))
+        }
+    }
+
+    @Test
+    fun enrichmentFailureWarningPromisesRetryOnlyForRetryableFailures() {
+        val retryable = enrichmentFailureWarningText(
+            "One capture exceeds this local model's context budget. " +
+                "[code=capture_input_too_large; retryable=false]",
+        )
+        assertTrue(retryable.contains("choose Enrich to retry"))
+        assertFalse(retryable.contains("[code="))
+
+        val terminal = enrichmentFailureWarningText(
+            "The ordered raw transcript source is invalid. " +
+                "[code=invalid_source; retryable=false]",
+        )
+        assertTrue(terminal.contains("cannot be retried from this night"))
+        assertFalse(terminal.contains("choose Enrich to retry"))
+        assertFalse(terminal.contains("[code="))
+    }
+
+    @Test
+    fun terminalSourceFailuresDoNotClaimCompletedTranscriptInNightDetail() {
+        listOf(
+            "raw_source_unavailable" to "raw transcript was not fully available",
+            "invalid_source" to "ordered raw transcript source was invalid",
+        ).forEach { (code, expectedReason) ->
+            val text = enrichmentFailureWarningText(
+                "A source check failed. [code=$code; retryable=false]",
+            )
+
+            assertTrue(text.contains(expectedReason))
+            assertTrue(text.contains("cannot be retried from this night"))
+            assertFalse(text.contains("completed raw transcript was preserved"))
+            assertFalse(text.contains("[code="))
+        }
     }
 
     @Test
@@ -52,6 +216,34 @@ class NightHistoryUiTest {
         assertTrue(text.contains("raw transcript was preserved"))
         assertTrue(text.contains("retry from this night"))
         assertFalse(text.contains("[code="))
+    }
+
+    @Test
+    fun enrichmentDetailShowsWhenCompletedTranscriptionIsReadyForEnrichment() {
+        assertEquals(
+            "Ready to enrich",
+            enrichmentProcessingText(
+                state = ProcessingState.NOT_STARTED,
+                failure = null,
+                transcriptionState = ProcessingState.COMPLETE,
+            ),
+        )
+        assertEquals(
+            "Ready to enrich",
+            enrichmentProcessingText(
+                state = ProcessingState.WAITING_FOR_TRANSCRIPTION,
+                failure = null,
+                transcriptionState = ProcessingState.COMPLETE,
+            ),
+        )
+        assertEquals(
+            "Waiting for transcription",
+            enrichmentProcessingText(
+                state = ProcessingState.WAITING_FOR_TRANSCRIPTION,
+                failure = null,
+                transcriptionState = ProcessingState.RUNNING,
+            ),
+        )
     }
 
     @Test
@@ -471,7 +663,10 @@ class NightHistoryUiTest {
             eventId = "session-gap",
             epochMillis = 120_000L,
             type = "audio_gap",
-            attributes = emptyMap(),
+            attributes = mapOf(
+                "estimated_gap_millis" to "64",
+                "evidence" to "confirmed_persistent_timestamp_deficit",
+            ),
             sessionId = "session-1",
         )
 
@@ -492,7 +687,47 @@ class NightHistoryUiTest {
         assertTrue(
             captureEvidence(affected)
                 .orEmpty()
-                .contains("audio gap was observed during an affected recollection"),
+                .contains(
+                    "an estimated 64 ms audio-clock discontinuity was observed during " +
+                        "an affected recollection",
+                ),
+        )
+        assertEquals(
+            "May be incomplete · confirmed audio-clock deficit",
+            sessionCaptureText(affected, affected.sessions.single()),
+        )
+    }
+
+    @Test
+    fun legacyUnconfirmedTimestampGapDoesNotClaimCaptureIssue() {
+        val base = nightRecord().copy(
+            night = nightRecord().night.copy(
+                reportedIncompleteSessionCount = 1,
+                hadAudioGap = true,
+                enrichmentState = ProcessingState.WAITING_FOR_TRANSCRIPTION,
+            ),
+            sessions = nightRecord().sessions.map {
+                it.copy(incompleteReason = SessionIncompleteReason.AUDIO_GAP)
+            },
+            events = listOf(
+                event(
+                    eventId = "legacy-session-gap",
+                    epochMillis = 120_000L,
+                    type = "audio_gap",
+                    attributes = mapOf("estimated_gap_millis" to "64"),
+                    sessionId = "session-1",
+                ),
+            ),
+            dreams = emptyList(),
+        )
+
+        assertFalse(hasOwnerFacingCaptureIssue(base))
+        assertNull(captureEvidence(base))
+        assertEquals("Ready to enrich", historyStatus(base))
+        assertEquals("— dreams", dreamCountText(base))
+        assertEquals(
+            "Timestamp anomaly · capture gap unverified",
+            sessionCaptureText(base, base.sessions.single()),
         )
     }
 
@@ -546,10 +781,69 @@ class NightHistoryUiTest {
     }
 
     @Test
+    fun reviewedCaptureIssueKeepsTechnicalEvidenceAndResurfacesWhenEvidenceChanges() {
+        val issue = nightRecord().copy(
+            night = nightRecord().night.copy(
+                captureState = NightCaptureState.INTERRUPTED,
+                interrupted = true,
+                endReason = "process_interrupted",
+            ),
+        )
+        val fingerprint = CaptureIssueFingerprint.current(issue)
+
+        assertTrue(hasUnreviewedCaptureIssue(issue))
+        assertTrue(fingerprint != null)
+        assertEquals(64, fingerprint?.length)
+
+        val reviewed = issue.copy(
+            night = issue.night.copy(
+                captureIssueReviewedFingerprint = fingerprint,
+            ),
+        )
+        assertFalse(hasUnreviewedCaptureIssue(reviewed))
+        assertNull(captureEvidence(reviewed))
+        assertEquals("Complete", historyStatus(reviewed))
+        assertTrue(
+            captureEvidenceText(reviewed)
+                .orEmpty()
+                .startsWith("Capture evidence (reviewed):"),
+        )
+        val processingFailure = reviewed.copy(
+            night = reviewed.night.copy(
+                transcriptionState = ProcessingState.FAILED,
+            ),
+        )
+        assertFalse(hasUnreviewedCaptureIssue(processingFailure))
+        assertEquals("Transcription failed", historyStatus(processingFailure))
+
+        val changed = reviewed.copy(
+            events = listOf(
+                event(
+                    eventId = "new-capture-failure",
+                    epochMillis = 200_000L,
+                    type = "capture_failure",
+                    attributes = mapOf("kind" to "audio_read"),
+                ),
+            ),
+        )
+        assertTrue(hasUnreviewedCaptureIssue(changed))
+        assertEquals("Complete · Capture issue", historyStatus(changed))
+    }
+
+    @Test
     fun compactHistoryLabelsUseDreamsWakewordsAndPrioritizedStatus() {
         val complete = nightRecord()
         val interrupted = complete.copy(
             night = complete.night.copy(interrupted = true),
+        )
+        val pending = complete.copy(
+            night = complete.night.copy(
+                enrichmentState = ProcessingState.WAITING_FOR_TRANSCRIPTION,
+            ),
+            dreams = emptyList(),
+        )
+        val pendingWithCaptureIssue = pending.copy(
+            night = pending.night.copy(interrupted = true),
         )
         val bothProcessingFailures = interrupted.copy(
             night = interrupted.night.copy(
@@ -560,11 +854,14 @@ class NightHistoryUiTest {
 
         assertEquals("1 dream", dreamCountText(complete))
         assertEquals("0 dreams", dreamCountText(complete.copy(dreams = emptyList())))
+        assertEquals("— dreams", dreamCountText(pending))
+        assertEquals("1 dream", dreamCountText(pending.copy(dreams = complete.dreams)))
         assertEquals("1 wakeword", wakewordCountText(complete))
         assertEquals("0 wakewords", wakewordCountText(complete.copy(sessions = emptyList())))
         assertEquals("Complete", historyStatus(complete))
-        assertEquals("Capture issue", historyStatus(interrupted))
+        assertEquals("Complete · Capture issue", historyStatus(interrupted))
         assertTrue(historyStatusIsError(interrupted))
+        assertEquals("Ready to enrich · Capture issue", historyStatus(pendingWithCaptureIssue))
         assertEquals("Transcription failed", historyStatus(bothProcessingFailures))
         assertTrue(historyStatusIsError(bothProcessingFailures))
         assertEquals(

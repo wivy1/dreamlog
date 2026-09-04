@@ -15,10 +15,14 @@ internal object SherpaTokenSegmenter {
         sourceDurationMillis: Long,
         contentStartMillis: Long = 0L,
         triggeringWakePhrase: TriggeringWakePhrase? = null,
+        triggerReportMillis: Long? = null,
     ): TranscriptionResult {
         require(sourceDurationMillis >= 0L) { "Source duration is negative." }
         require(contentStartMillis in 0L..sourceDurationMillis) {
             "Content start is outside the recognized audio."
+        }
+        require(triggerReportMillis == null || triggerReportMillis in 0L..contentStartMillis) {
+            "Trigger report is outside the retained wake context."
         }
 
         val rawText = recognition.text.trim()
@@ -61,6 +65,7 @@ internal object SherpaTokenSegmenter {
             words = words,
             contentStartMillis = contentStartMillis,
             triggeringWakePhrase = triggeringWakePhrase,
+            triggerReportMillis = triggerReportMillis,
         )
         if (retainedWords.isEmpty()) {
             return TranscriptionResult(rawText = "", segments = emptyList())
@@ -97,25 +102,37 @@ internal object SherpaTokenSegmenter {
      * Removes only an exact, event-grounded trigger in the decode-only prefix.
      *
      * Keyword detection can be reported after immediate narration has already begun. When the
-     * exact trigger is found once at or before that report boundary, every later word is narration
-     * even if its timestamp is slightly before the boundary. Missing, garbled, or ambiguous
-     * trigger evidence falls back to the strict word-start boundary; no fuzzy deletion is used.
+     * exact trigger is found at or shortly before that report boundary, every later word is
+     * narration even if its timestamp is slightly before the boundary. A detector report selects
+     * the last exact nearby attempt when the owner repeated the phrase. Missing or garbled trigger
+     * evidence falls back to the strict word-start boundary; no fuzzy deletion is used.
      */
     private fun selectNarrationWords(
         words: List<TimedText>,
         contentStartMillis: Long,
         triggeringWakePhrase: TriggeringWakePhrase?,
+        triggerReportMillis: Long?,
     ): List<TimedText> {
         if (contentStartMillis == 0L) return words
+        val exactMatchBoundary = triggerReportMillis ?: contentStartMillis
         val exactMatches = triggeringWakePhrase?.let { phrase ->
             exactControlPhraseMatches(
                 words = words,
-                contentStartMillis = contentStartMillis,
+                matchBoundaryMillis = exactMatchBoundary,
                 expectedCanonicalText = phrase.canonicalText,
             )
         }.orEmpty()
-        return if (exactMatches.size == 1) {
-            words.drop(exactMatches.single().last + 1)
+        val selectedMatch = if (triggerReportMillis == null) {
+            exactMatches.singleOrNull()
+        } else {
+            val earliestGroundedStart =
+                (triggerReportMillis - TRIGGER_REPORT_LOOKBACK_MILLIS).coerceAtLeast(0L)
+            exactMatches.lastOrNull { match ->
+                words[match.first].startMillis >= earliestGroundedStart
+            }
+        }
+        return if (selectedMatch != null) {
+            words.drop(selectedMatch.last + 1)
         } else {
             words.dropWhile { it.startMillis < contentStartMillis }
         }
@@ -123,16 +140,16 @@ internal object SherpaTokenSegmenter {
 
     private fun exactControlPhraseMatches(
         words: List<TimedText>,
-        contentStartMillis: Long,
+        matchBoundaryMillis: Long,
         expectedCanonicalText: String,
     ): List<IntRange> {
         val matches = mutableListOf<IntRange>()
         for (startIndex in words.indices) {
-            if (words[startIndex].startMillis > contentStartMillis) break
+            if (words[startIndex].startMillis > matchBoundaryMillis) break
             var combined = ""
             for (endIndex in startIndex..words.lastIndex) {
                 val word = words[endIndex]
-                if (word.startMillis > contentStartMillis) break
+                if (word.startMillis > matchBoundaryMillis) break
                 combined += word.text.canonicalControlText()
                 if (!expectedCanonicalText.startsWith(combined)) break
                 if (combined == expectedCanonicalText) {
@@ -143,6 +160,8 @@ internal object SherpaTokenSegmenter {
         }
         return matches
     }
+
+    private const val TRIGGER_REPORT_LOOKBACK_MILLIS = 2_500L
 
     private fun timestampsAreUsable(
         timestamps: List<Float>,

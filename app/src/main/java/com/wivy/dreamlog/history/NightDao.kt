@@ -97,6 +97,20 @@ abstract class NightDao {
         rawAudioState: String,
     ): Int
 
+    @Query(
+        "UPDATE nights SET captureIssueReviewedFingerprint = :fingerprint " +
+            "WHERE nightId = :nightId",
+    )
+    protected abstract fun updateCaptureIssueReviewedFingerprint(
+        nightId: String,
+        fingerprint: String?,
+    ): Int
+
+    fun setCaptureIssueReviewedFingerprint(
+        nightId: String,
+        fingerprint: String?,
+    ): Boolean = updateCaptureIssueReviewedFingerprint(nightId, fingerprint) == 1
+
     @Transaction
     open fun markNightRawAudioDeleted(nightId: String): Boolean {
         val existing = readNight(nightId) ?: return false

@@ -43,13 +43,15 @@ enum class TriggeringWakePhrase(
  *
  * Earlier acoustic context can keep a recognizer from starting on the first narration phoneme.
  * Words beginning before [contentStartSample] are excluded unless an exact triggering phrase is
- * supplied and removed; every word after that marker is then retained. This lets modern sessions
- * decode from their retained wake context without persisting the wake phrase as dream text.
+ * supplied and removed; every word after that marker is then retained. [triggerReportSample]
+ * anchors repeated attempts to the detector report that started this session. This lets modern
+ * sessions decode retained wake context without persisting the wake phrase as dream text.
  */
 data class TranscriptionInput(
     val acousticRange: Pcm16WavSource.RecognitionRange,
     val contentStartSample: Long = acousticRange.startSample,
     val triggeringWakePhrase: TriggeringWakePhrase? = null,
+    val triggerReportSample: Long? = null,
     val openingRecoveryFloorSample: Long? = null,
     val observedNonSpeechRanges: List<SessionNonSpeechRange> = emptyList(),
 ) {
@@ -60,6 +62,19 @@ data class TranscriptionInput(
         acousticRange.endSampleExclusive?.let { endSampleExclusive ->
             require(contentStartSample <= endSampleExclusive) {
                 "Transcription content starts after its acoustic range."
+            }
+        }
+        triggerReportSample?.let { triggerReport ->
+            require(triggerReport >= acousticRange.startSample) {
+                "Trigger report starts before the acoustic context."
+            }
+            acousticRange.endSampleExclusive?.let { endSampleExclusive ->
+                require(triggerReport <= endSampleExclusive) {
+                    "Trigger report starts after the acoustic context."
+                }
+            }
+            require(triggerReport <= contentStartSample) {
+                "Trigger report starts after the narration fallback boundary."
             }
         }
         openingRecoveryFloorSample?.let { recoveryFloor ->

@@ -175,8 +175,61 @@ class NightEnrichmentCoordinatorTest {
     }
 
     @Test
-    fun knownOversizedRequestIsRejectedBeforeTheModelLoads() {
-        val segments = (0 until 700).map { index ->
+    fun indivisibleOversizedSourceUnitIsRejectedBeforeTheModelLoads() {
+        val segments = listOf(
+            NightTranscriptSegment(
+                nightId = NIGHT_ID,
+                sessionId = "session-a",
+                sessionOrder = 0,
+                transcriptAttempt = 1,
+                segmentIndex = 0,
+                sourceStartMillis = 0L,
+                sourceEndMillis = 100L,
+                text = "abcdefghij".repeat(500),
+            ),
+        )
+        val store = FakeStore(completedSource(segments))
+        val factory = FakeEngineFactory(response = { error("The model must not load.") })
+
+        val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Failure)
+        outcome as EnrichmentRunOutcome.Failure
+        assertEquals(EnrichmentFailureCode.SOURCE_UNIT_TOO_LARGE, outcome.code)
+        assertFalse(outcome.retryable)
+        assertTrue(outcome.rawFallbackAvailable)
+        assertEquals("source_unit_too_large", store.failed?.code)
+        assertEquals(0, factory.openCount)
+        assertEquals(0, factory.closeCount)
+    }
+
+    @Test
+    fun nonSizeRequestPreparationFailureIsPersistedAndDoesNotLeaveClaimStale() {
+        val store = FakeStore(completedSource())
+        val factory = FakeEngineFactory(response = { error("The model must not load.") })
+        val coordinator = coordinator(
+            store = store,
+            factory = factory,
+            gate = FakeGate(),
+            requestPartitioner = { error("prompt invariant failure") },
+        )
+
+        val outcome = coordinator.processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Failure)
+        outcome as EnrichmentRunOutcome.Failure
+        assertEquals(EnrichmentFailureCode.UNEXPECTED_FAILURE, outcome.code)
+        assertTrue(outcome.retryable)
+        assertTrue(outcome.rawFallbackAvailable)
+        assertEquals("unexpected_failure", store.failed?.code)
+        assertFalse(store.failed!!.detail.contains("prompt invariant failure"))
+        assertEquals(0, store.completeCount)
+        assertEquals(0, factory.openCount)
+    }
+
+    @Test
+    fun knownOversizedSingleCaptureIsSplitIntoBoundedRequestsAndMergedAsOneDream() {
+        val segments = (0 until 200).map { index ->
             NightTranscriptSegment(
                 nightId = NIGHT_ID,
                 sessionId = "session-a",
@@ -185,22 +238,87 @@ class NightEnrichmentCoordinatorTest {
                 segmentIndex = index,
                 sourceStartMillis = index * 100L,
                 sourceEndMillis = (index + 1L) * 100L,
-                text = "abcdefghij",
+                text = if (index == 199) "a".repeat(177) else "a".repeat(16),
             )
         }
+        assertEquals(3_361, segments.sumOf { it.text.length })
         val store = FakeStore(completedSource(segments))
-        val factory = FakeEngineFactory(response = { error("The model must not load.") })
+        val factory = FakeEngineFactory(response = { request ->
+            val lastAlias = Regex("s[0-9]+")
+                .findAll(request.userContent.lineSequence().first())
+                .last()
+                .value
+            assertTrue(request.userContent.length <= MAX_ENRICHMENT_USER_CONTENT_CHARACTERS)
+            EnrichmentEngineResult(
+                "{\"parts\":[{\"dream\":\"d0\",\"kind\":\"dream\"," +
+                    "\"uncertain\":false,\"start\":\"s0\",\"end\":\"$lastAlias\"}]}" ,
+            )
+        })
 
         val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
 
-        assertTrue(outcome is EnrichmentRunOutcome.Failure)
-        outcome as EnrichmentRunOutcome.Failure
-        assertEquals(EnrichmentFailureCode.INPUT_TOO_LARGE, outcome.code)
-        assertFalse(outcome.retryable)
-        assertTrue(outcome.rawFallbackAvailable)
-        assertEquals("capture_input_too_large", store.failed?.code)
-        assertEquals(0, factory.openCount)
-        assertEquals(0, factory.closeCount)
+        assertTrue(outcome is EnrichmentRunOutcome.Completed)
+        outcome as EnrichmentRunOutcome.Completed
+        assertTrue(factory.generateCount > 1)
+        assertEquals(1, store.completeCount)
+        assertEquals(1, outcome.dreamCount)
+        assertEquals(
+            segments.map(NightTranscriptSegment::id),
+            store.completed!!.dreams.single().sourceSpans
+                .flatMap(EnrichedSourceSpan::segmentIds),
+        )
+    }
+
+    @Test
+    fun oversizedAssociationCuePartitionMergesBackIntoEarlierDreamWithSourceRole() {
+        val segments = (0 until 200).map { index ->
+            NightTranscriptSegment(
+                nightId = NIGHT_ID,
+                sessionId = "session-a",
+                sessionOrder = 0,
+                transcriptAttempt = 1,
+                segmentIndex = index,
+                sourceStartMillis = index * 100L,
+                sourceEndMillis = (index + 1L) * 100L,
+                text = when (index) {
+                    100 -> "CORRECTION THE FIRST DREAM HAD A BLUE TRAIN"
+                    else -> "a".repeat(16)
+                },
+            )
+        }
+        val store = FakeStore(completedSource(segments))
+        val factory = FakeEngineFactory(response = { request ->
+            val lastAlias = Regex("s[0-9]+")
+                .findAll(request.userContent.lineSequence().first())
+                .last()
+                .value
+            assertTrue(request.userContent.length <= MAX_ENRICHMENT_USER_CONTENT_CHARACTERS)
+            val firstCue = Regex("s0 cue=([^ ]+)")
+                .find(request.userContent)
+                ?.groupValues
+                ?.get(1)
+            val kind = if (firstCue == "correction") "fragment" else "dream"
+            val uncertain = firstCue == "correction"
+            EnrichmentEngineResult(
+                "{\"parts\":[{\"dream\":\"d0\",\"kind\":\"$kind\"," +
+                    "\"uncertain\":$uncertain,\"start\":\"s0\",\"end\":\"$lastAlias\"}]}",
+            )
+        })
+
+        val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Completed)
+        assertTrue(factory.generateCount > 1)
+        assertEquals(1, store.completeCount)
+        val dream = store.completed!!.dreams.single()
+        assertEquals(1, store.completed!!.dreams.size)
+        assertEquals(
+            segments.map(NightTranscriptSegment::id),
+            dream.sourceSpans.flatMap(EnrichedSourceSpan::segmentIds),
+        )
+        assertEquals(DreamSourceRole.CORRECTION, dream.sourceSpans.last().role)
+        assertEquals(100, dream.sourceSpans.last().startSegmentIndex)
+        assertEquals(100, dream.sourceSpans.last().segmentIds.first().segmentIndex)
     }
 
     @Test
@@ -499,6 +617,127 @@ class NightEnrichmentCoordinatorTest {
     }
 
     @Test
+    fun foregroundLossAfterGenerationFailsTheClaimAndLeavesLaterNightsUnstarted() {
+        val firstNightId = "night-interrupted"
+        val laterNightId = "night-not-started"
+        val store = FakeStore(
+            source = null,
+            sourcesByNight = mapOf(
+                firstNightId to completedSourceFor(firstNightId, "first source"),
+                laterNightId to completedSourceFor(laterNightId, "later source"),
+            ),
+        )
+        var interruption: EnrichmentInterruptionCause? = null
+        val factory = FakeEngineFactory(response = {
+            interruption = EnrichmentInterruptionCause.APP_HIDDEN
+            EnrichmentEngineResult(validOutput())
+        })
+        val gate = FakeGate()
+
+        val outcome = coordinator(
+            store = store,
+            factory = factory,
+            gate = gate,
+            interruptionCause = { interruption },
+        ).processBatch(listOf(firstNightId, laterNightId))
+
+        assertTrue(outcome.stoppedEarly)
+        assertEquals(1, outcome.failedNightCount)
+        assertEquals(1, outcome.unstartedNightCount)
+        assertEquals(
+            EnrichmentFailureCode.APP_HIDDEN,
+            (outcome.outcomes.single() as EnrichmentRunOutcome.Failure).code,
+        )
+        assertEquals("app_hidden", store.failuresByNight[firstNightId]?.code)
+        assertFalse(store.failuresByNight.containsKey(laterNightId))
+        assertEquals(0, store.completeCount)
+        assertEquals(1, factory.closeCount)
+        assertEquals(1, gate.closeCount)
+    }
+
+    @Test
+    fun foregroundLossDuringInferenceWinsOverNativeInferenceFailure() {
+        val store = FakeStore(completedSource())
+        var interruption: EnrichmentInterruptionCause? = null
+        val factory = FakeEngineFactory(response = {
+            interruption = EnrichmentInterruptionCause.APP_HIDDEN
+            error("private native inference detail")
+        })
+
+        val outcome = coordinator(
+            store = store,
+            factory = factory,
+            gate = FakeGate(),
+            interruptionCause = { interruption },
+        ).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Failure)
+        outcome as EnrichmentRunOutcome.Failure
+        assertEquals(EnrichmentFailureCode.APP_HIDDEN, outcome.code)
+        assertFalse(outcome.code == EnrichmentFailureCode.INFERENCE_FAILED)
+        assertEquals("app_hidden", store.failed?.code)
+        assertEquals(0, store.completeCount)
+        assertEquals(1, factory.closeCount)
+    }
+
+    @Test
+    fun foregroundLossDuringValidationWinsOverInvalidModelOutput() {
+        val store = FakeStore(completedSource())
+        var generationReturned = false
+        var postGenerationChecks = 0
+        val factory = FakeEngineFactory(response = {
+            generationReturned = true
+            EnrichmentEngineResult("{")
+        })
+
+        val outcome = coordinator(
+            store = store,
+            factory = factory,
+            gate = FakeGate(),
+            interruptionCause = {
+                if (generationReturned && ++postGenerationChecks >= 3) {
+                    EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED
+                } else {
+                    null
+                }
+            },
+        ).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Failure)
+        outcome as EnrichmentRunOutcome.Failure
+        assertEquals(EnrichmentFailureCode.SCREEN_OFF_OR_LOCKED, outcome.code)
+        assertEquals("screen_off_or_locked", store.failed?.code)
+        assertEquals(0, store.completeCount)
+    }
+
+    @Test
+    fun foregroundLossBeforeWorkLeavesTheWholeFrozenBatchUnstarted() {
+        val store = FakeStore(completedSource())
+        val factory = FakeEngineFactory(response = { error("Inference must not start.") })
+        val gate = FakeGate()
+
+        val coordinator = coordinator(
+            store = store,
+            factory = factory,
+            gate = gate,
+            interruptionCause = { EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED },
+        )
+        val outcome = coordinator.processBatch(listOf("night-a", "night-b"))
+
+        assertTrue(outcome.stoppedEarly)
+        assertTrue(outcome.outcomes.isEmpty())
+        assertEquals(2, outcome.unstartedNightCount)
+        assertEquals(0, store.loadCount)
+        assertEquals(0, factory.openCount)
+        assertEquals(0, gate.acquireCount)
+        assertEquals(EnrichmentOperationPhase.FAILED, coordinator.operationState.current().phase)
+        assertEquals(
+            EnrichmentFailureCode.SCREEN_OFF_OR_LOCKED,
+            coordinator.operationState.current().failureCode,
+        )
+    }
+
+    @Test
     fun batchPreservesFirstOccurrenceOrderAndDeduplicatesTrimmedIds() {
         val firstNightId = "night-b"
         val secondNightId = "night-a"
@@ -553,6 +792,9 @@ class NightEnrichmentCoordinatorTest {
         store: FakeStore,
         factory: FakeEngineFactory,
         gate: FakeGate,
+        interruptionCause: () -> EnrichmentInterruptionCause? = { null },
+        requestPartitioner: (OrderedNightTranscript) -> List<OrderedNightTranscript> =
+            OrderedNightTranscript::enrichmentRequestPartitions,
     ): NightEnrichmentCoordinator {
         var time = 100L
         return NightEnrichmentCoordinator(
@@ -560,6 +802,8 @@ class NightEnrichmentCoordinatorTest {
             engineFactory = factory,
             operationGate = gate,
             clock = { time++ },
+            interruptionCause = interruptionCause,
+            requestPartitioner = requestPartitioner,
         )
     }
 

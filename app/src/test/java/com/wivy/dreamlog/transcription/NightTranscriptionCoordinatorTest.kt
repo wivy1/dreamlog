@@ -169,6 +169,7 @@ class NightTranscriptionCoordinatorTest {
                 endSampleExclusive = 64_000L,
                 contentStartSample = 32_000L,
                 triggeringWakePhrase = TriggeringWakePhrase.DREAM_LOG,
+                triggerReportSample = 32_000L,
             ),
             engine.calls.single().second,
         )
@@ -245,6 +246,7 @@ class NightTranscriptionCoordinatorTest {
                 endSampleExclusive = 400_000L,
                 contentStartSample = 35_000L,
                 triggeringWakePhrase = TriggeringWakePhrase.DREAM_LOG,
+                triggerReportSample = 32_000L,
                 openingRecoveryFloorSample = 56_000L,
             ),
             engine.calls.single().second,
@@ -970,6 +972,15 @@ class NightTranscriptionCoordinatorTest {
             return 1
         }
 
+        override fun updateCaptureIssueReviewedFingerprint(
+            nightId: String,
+            fingerprint: String?,
+        ): Int {
+            if (night.nightId != nightId) return 0
+            night = night.copy(captureIssueReviewedFingerprint = fingerprint)
+            return 1
+        }
+
         override fun deleteNight(nightId: String): Int =
             if (night.nightId == nightId) 1 else 0
 
@@ -1115,6 +1126,7 @@ class NightTranscriptionCoordinatorTest {
             endSampleExclusive: Long,
             contentStartSample: Long = startSample,
             triggeringWakePhrase: TriggeringWakePhrase? = null,
+            triggerReportSample: Long? = null,
             openingRecoveryFloorSample: Long? = null,
             observedNonSpeechRanges: List<SessionNonSpeechRange> = emptyList(),
         ) = TranscriptionInput(
@@ -1124,6 +1136,7 @@ class NightTranscriptionCoordinatorTest {
             ),
             contentStartSample = contentStartSample,
             triggeringWakePhrase = triggeringWakePhrase,
+            triggerReportSample = triggerReportSample,
             openingRecoveryFloorSample = openingRecoveryFloorSample,
             observedNonSpeechRanges = observedNonSpeechRanges,
         )

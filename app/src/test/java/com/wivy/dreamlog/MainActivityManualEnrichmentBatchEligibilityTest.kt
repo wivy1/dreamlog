@@ -3,6 +3,10 @@ package com.wivy.dreamlog
 import com.wivy.dreamlog.capture.CapturePhase
 import com.wivy.dreamlog.capture.CaptureRuntimeSnapshot
 import com.wivy.dreamlog.capture.CaptureSnapshot
+import com.wivy.dreamlog.enrichment.EnrichmentFailureCode
+import com.wivy.dreamlog.enrichment.EnrichmentInterruptionCause
+import com.wivy.dreamlog.enrichment.EnrichmentModelPhase
+import com.wivy.dreamlog.enrichment.EnrichmentRuntimePhase
 import com.wivy.dreamlog.enrichment.EnrichmentRuntimeSnapshot
 import com.wivy.dreamlog.history.AudioEvidenceState
 import com.wivy.dreamlog.history.CaptureSessionEntity
@@ -25,8 +29,86 @@ import org.junit.Test
 
 class MainActivityManualEnrichmentBatchEligibilityTest {
     @Test
+    fun landscapeUsesTwoColumnsWhilePortraitStaysSingleColumn() {
+        assertEquals(HomeLayoutMode.TWO_COLUMN, homeLayoutMode(isLandscape = true))
+        assertEquals(HomeLayoutMode.SINGLE_COLUMN, homeLayoutMode(isLandscape = false))
+    }
+
+    @Test
     fun primaryActionIsAtLeastTwiceThePriorHeight() {
         assertTrue(HOME_PRIMARY_ACTION_HEIGHT_DP >= 152)
+    }
+
+    @Test
+    fun pendingEnrichmentOffersStartNightInsteadOnlyWhenStartingIsActuallySafe() {
+        val enrich = HomeMorningAction(
+            kind = HomeNextActionKind.ENRICH,
+            title = "Ready to enrich",
+            body = "Transcript ready.",
+            buttonLabel = "Enrich",
+        )
+        val enriching = HomeMorningAction(
+            kind = HomeNextActionKind.ENRICHING,
+            title = "Enriching dreams",
+            body = "Running.",
+        )
+
+        assertTrue(canStartNightInstead(enrich, startEnabled = true))
+        assertFalse(canStartNightInstead(enrich, startEnabled = false))
+        assertFalse(canStartNightInstead(enriching, startEnabled = true))
+        assertFalse(canStartNightInstead(null, startEnabled = true))
+    }
+
+    @Test
+    fun foregroundLossIsProminentWhileStoppingAndAfterRetryBecomesAvailable() {
+        val ready = record()
+        val stopping = homeMorningAction(
+            latestResult = ready,
+            transcriptionRuntime = TranscriptionRuntimeSnapshot(),
+            enrichmentRuntime = EnrichmentRuntimeSnapshot(
+                runtimePhase = EnrichmentRuntimePhase.RUNNING,
+                interruptionCause = EnrichmentInterruptionCause.APP_HIDDEN,
+            ),
+            readyEnrichmentRecords = listOf(ready),
+        )
+        assertEquals("Stopping enrichment", stopping?.title)
+        assertTrue(stopping?.body.orEmpty().contains("hidden"))
+
+        val failed = record(
+            enrichmentState = ProcessingState.FAILED,
+            enrichmentFailure = EnrichmentFailureCode.APP_HIDDEN.safeDetail +
+                " [code=app_hidden; retryable=true]",
+        )
+        val retry = homeMorningAction(
+            latestResult = failed,
+            transcriptionRuntime = TranscriptionRuntimeSnapshot(),
+            enrichmentRuntime = EnrichmentRuntimeSnapshot(),
+            readyEnrichmentRecords = listOf(failed),
+        )
+        assertTrue(retry?.body.orEmpty().contains("DreamLog was hidden"))
+        assertFalse(retry?.body.orEmpty().contains("[code="))
+    }
+
+    @Test
+    fun partialBatchInterruptionSurfacesTheOlderUnstartedNightOnHome() {
+        val completedLatest = record(enrichmentState = ProcessingState.COMPLETE)
+        val pendingOlder = record().copy(
+            night = record().night.copy(nightId = "night-older"),
+        )
+
+        val action = homeMorningAction(
+            latestResult = completedLatest,
+            transcriptionRuntime = TranscriptionRuntimeSnapshot(),
+            enrichmentRuntime = EnrichmentRuntimeSnapshot(
+                runtimePhase = EnrichmentRuntimePhase.ERROR,
+                runtimeError = "Enrichment stopped because DreamLog was hidden.",
+            ),
+            readyEnrichmentRecords = listOf(pendingOlder),
+        )
+
+        assertEquals(HomeNextActionKind.ENRICH, action?.kind)
+        assertEquals("night-older", action?.nightId)
+        assertTrue(action?.body.orEmpty().contains("hidden"))
     }
 
     @Test
@@ -178,6 +260,74 @@ class MainActivityManualEnrichmentBatchEligibilityTest {
                     "The input is too large. [code=input_too_large; retryable=false]",
             ).isReadyForManualEnrichmentBatch(),
         )
+        assertTrue(
+            record(
+                enrichmentState = ProcessingState.FAILED,
+                enrichmentFailure =
+                    "One capture exceeds this local model's context budget. " +
+                        "[code=capture_input_too_large; retryable=false]",
+            ).isReadyForManualEnrichmentBatch(),
+        )
+    }
+
+    @Test
+    fun upgradeCompatibleOversizeFailureReturnsEnrichActionWithCleanCopy() {
+        listOf("input_too_large", "capture_input_too_large").forEach { code ->
+            val failed = record(
+                enrichmentState = ProcessingState.FAILED,
+                enrichmentFailure =
+                    "One capture exceeds this local model's context budget. " +
+                        "The raw transcript remains available to retry after an app update. " +
+                        "[code=$code; retryable=false]",
+            )
+
+            val action = homeMorningAction(
+                latestResult = failed,
+                transcriptionRuntime = TranscriptionRuntimeSnapshot(),
+                enrichmentRuntime = EnrichmentRuntimeSnapshot(
+                    modelPhase = EnrichmentModelPhase.INSTALLED,
+                ),
+                readyEnrichmentRecords = listOf(failed),
+            )
+
+            assertEquals(HomeNextActionKind.ENRICH, action?.kind)
+            assertEquals("Enrich", action?.buttonLabel)
+            assertTrue(
+                action?.body.orEmpty()
+                    .contains("previous enrichment path could not fit this night's transcript"),
+            )
+            assertFalse(action?.body.orEmpty().contains("this capture"))
+            assertTrue(action?.body.orEmpty().contains("choose Enrich to retry"))
+            assertFalse(action?.body.orEmpty().contains("budget.."))
+            assertFalse(action?.body.orEmpty().contains("after an app update"))
+            assertFalse(action?.body.orEmpty().contains("[code="))
+            assertFalse(action?.detail.orEmpty().contains("[code="))
+            assertFalse(action?.detail.orEmpty().contains("after an app update"))
+        }
+    }
+
+    @Test
+    fun defensiveNonretryableFailureSaysItCannotBeRetriedFromHome() {
+        val failed = record(
+            enrichmentState = ProcessingState.FAILED,
+            enrichmentFailure =
+                "The ordered raw transcript source is invalid. " +
+                    "[code=invalid_source; retryable=false]",
+        )
+
+        val action = homeMorningAction(
+            latestResult = failed,
+            transcriptionRuntime = TranscriptionRuntimeSnapshot(),
+            enrichmentRuntime = EnrichmentRuntimeSnapshot(
+                modelPhase = EnrichmentModelPhase.INSTALLED,
+            ),
+            readyEnrichmentRecords = listOf(failed),
+        )
+
+        assertEquals(HomeNextActionKind.ENRICH, action?.kind)
+        assertTrue(action?.body.orEmpty().contains("cannot be retried from Home"))
+        assertFalse(action?.body.orEmpty().contains("choose Enrich"))
+        assertFalse(action?.body.orEmpty().contains("[code="))
     }
 
     @Test

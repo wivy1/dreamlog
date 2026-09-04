@@ -34,20 +34,36 @@ import java.util.UUID
 
 internal fun persistedEnrichmentFailureIsRetryable(detail: String?): Boolean = detail?.let {
     PERSISTED_RETRYABLE.find(it)?.let { marker ->
-        marker.groupValues[2] == "true" || marker.groupValues[1] == LEGACY_OVERSIZE_CODE
+        marker.groupValues[2] == "true" || marker.groupValues[1] in UPGRADE_RETRYABLE_OVERSIZE_CODES
     }
 } == true
 
-internal fun persistedEnrichmentFailureDisplayDetail(detail: String?): String? =
-    detail
-        ?.replace(PERSISTED_RETRYABLE, "")
-        ?.trim()
-        ?.ifBlank { null }
+internal fun persistedEnrichmentFailureCode(detail: String?): String? = detail?.let {
+    PERSISTED_RETRYABLE.find(it)?.groupValues?.getOrNull(1)
+}
+
+internal fun persistedEnrichmentFailureDisplayDetail(detail: String?): String? {
+    if (detail == null) return null
+    val marker = PERSISTED_RETRYABLE.find(detail)
+    if (marker?.groupValues?.get(1) in UPGRADE_RETRYABLE_OVERSIZE_CODES) {
+        return UPGRADE_RETRYABLE_OVERSIZE_DISPLAY_DETAIL
+    }
+    return detail
+        .replace(PERSISTED_RETRYABLE, "")
+        .trim()
+        .ifBlank { null }
+}
 
 private val PERSISTED_RETRYABLE = Regex(
     "\\[code=([a-z0-9_]+); retryable=(true|false)]$",
 )
-private const val LEGACY_OVERSIZE_CODE = "input_too_large"
+private val UPGRADE_RETRYABLE_OVERSIZE_CODES = setOf(
+    "input_too_large",
+    "capture_input_too_large",
+)
+private const val UPGRADE_RETRYABLE_OVERSIZE_DISPLAY_DETAIL =
+    "The previous enrichment path could not fit this night's transcript in the local model's " +
+        "context budget."
 
 /**
  * Room-backed boundary between immutable M04 transcript evidence and M05 generated readings.

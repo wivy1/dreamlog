@@ -22,7 +22,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -220,6 +219,7 @@ class AudioCaptureEngine(
     private val listenerLock = Any()
     private val microphoneLock = Any()
     private val sessionLock = Any()
+    private val timestampResetLock = Any()
     private val sessionSequence = AtomicLong(0L)
 
     @Volatile
@@ -260,6 +260,7 @@ class AudioCaptureEngine(
         var ownCallbackRegistered = false
         var globalCallbackRegistered = false
         var monitor: ScheduledExecutorService? = null
+        val preRollBuffer = WakePreRollBuffer()
 
         publishReadiness(CaptureReadiness.WAITING_FOR_RECORDING_CONFIGURATION)
         try {
@@ -300,6 +301,7 @@ class AudioCaptureEngine(
                 wakeWordDetector = wakeWordDetector,
                 vad = vad,
                 player = player,
+                preRollBuffer = preRollBuffer,
             )
         } catch (failure: Throwable) {
             if (!stopping.get()) {
@@ -311,6 +313,7 @@ class AudioCaptureEngine(
                 )
             }
         } finally {
+            preRollBuffer.clear()
             callbackEventsEnabled.set(false)
             monitor?.shutdownNow()
             if (globalCallbackRegistered && globalCallback != null) {
@@ -356,12 +359,12 @@ class AudioCaptureEngine(
         wakeWordDetector: LiveKitWakeWordDetector,
         vad: Vad,
         player: CuePlayer,
+        preRollBuffer: WakePreRollBuffer,
     ) {
         val pcmFrame = ShortArray(FRAME_SAMPLES)
         val floatFrame = FloatArray(FRAME_SAMPLES)
-        val ringBuffer = ShortRingBuffer(PRE_ROLL_SAMPLES)
         val boundary = NarrativeBoundaryDetector(continuousNonSpeechSeconds)
-        val timestamps = AudioTimestampGapDetector()
+        val timestamps = AudioTimestampGapDetector(audioRecord.sampleRate)
         var filledSamples = 0
         var lastTimestampPollElapsedMillis = 0L
 
@@ -404,28 +407,33 @@ class AudioCaptureEngine(
             val completedFrame = completedFrameCount.incrementAndGet()
             val nowElapsedMillis = SystemClock.elapsedRealtime()
 
-            if (
-                nowElapsedMillis - lastTimestampPollElapsedMillis >=
-                AUDIO_TIMESTAMP_POLL_MILLIS
-            ) {
-                val gap = timestamps.observe(audioTimestamp(audioRecord))
-                lastTimestampPollElapsedMillis = nowElapsedMillis
-                if (gap != null) {
-                    handleAudioGap(gap, completedFrame)
+            val gap = synchronized(timestampResetLock) {
+                requestedDetectorReset.getAndSet(null)?.let { resetReason ->
+                    preRollBuffer.clear()
+                    resetWakeWordDetector(wakeWordDetector, resetReason)
+                    vad.reset()
+                    boundary.reset()
+                    timestamps.reset()
+                }
+
+                if (
+                    timestamps.confirmationPending ||
+                    nowElapsedMillis - lastTimestampPollElapsedMillis >=
+                    AUDIO_TIMESTAMP_POLL_MILLIS
+                ) {
+                    lastTimestampPollElapsedMillis = nowElapsedMillis
+                    timestamps.observe(audioTimestamp(audioRecord))
+                } else {
+                    null
                 }
             }
-
-            requestedDetectorReset.getAndSet(null)?.let { resetReason ->
-                ringBuffer.clear()
-                resetWakeWordDetector(wakeWordDetector, resetReason)
-                vad.reset()
-                boundary.reset()
-                timestamps.reset()
+            if (gap != null) {
+                handleAudioGap(gap, completedFrame)
             }
 
             maybePublishReady(completedFrame)
             if (!selectedConfigurationUsable) {
-                ringBuffer.clear()
+                preRollBuffer.clear()
                 continue
             }
 
@@ -462,7 +470,7 @@ class AudioCaptureEngine(
                                     )
                                     break
                                 }
-                                ringBuffer.clear()
+                                preRollBuffer.clear()
                                 resetWakeWordDetector(
                                     wakeWordDetector,
                                     KeywordStreamResetReason.NARRATIVE_COMPLETED,
@@ -474,7 +482,7 @@ class AudioCaptureEngine(
                     }
 
                     AppendResult.NO_ACTIVE_SESSION -> {
-                        ringBuffer.clear()
+                        preRollBuffer.clear()
                         resetWakeWordDetector(
                             wakeWordDetector,
                             KeywordStreamResetReason.SESSION_MISSING,
@@ -488,7 +496,7 @@ class AudioCaptureEngine(
                 continue
             }
 
-            ringBuffer.append(pcmFrame)
+            preRollBuffer.append(pcmFrame)
             if (
                 readiness.get() != CaptureReadiness.READY ||
                 isCuePlaybackInProgress()
@@ -517,7 +525,7 @@ class AudioCaptureEngine(
                 wakeWordDetector,
                 KeywordStreamResetReason.WAKE_DETECTED,
             )
-            val preRoll = ringBuffer.snapshot()
+            val preRoll = preRollBuffer.snapshotForAcceptedWake()
             val detectedAtElapsedRealtimeNanos =
                 SystemClock.elapsedRealtimeNanos()
             val detectedAtEpochMillis = System.currentTimeMillis()
@@ -548,7 +556,9 @@ class AudioCaptureEngine(
     }
 
     private fun requestDetectorReset(reason: KeywordStreamResetReason) {
-        requestedDetectorReset.set(reason)
+        synchronized(timestampResetLock) {
+            requestedDetectorReset.set(reason)
+        }
     }
 
     private fun resetWakeWordDetector(
@@ -1209,7 +1219,7 @@ class AudioCaptureEngine(
         )
     }
 
-    private fun audioTimestamp(audioRecord: AudioRecord): AudioTimestamp? {
+    private fun audioTimestamp(audioRecord: AudioRecord): AudioTimestampSample? {
         val timestamp = AudioTimestamp()
         return if (
             audioRecord.getTimestamp(
@@ -1217,7 +1227,10 @@ class AudioCaptureEngine(
                 AudioTimestamp.TIMEBASE_MONOTONIC,
             ) == AudioRecord.SUCCESS
         ) {
-            timestamp
+            AudioTimestampSample(
+                framePosition = timestamp.framePosition,
+                nanoTime = timestamp.nanoTime,
+            )
         } else {
             null
         }
@@ -1244,105 +1257,8 @@ class AudioCaptureEngine(
         STORAGE_FAILURE,
     }
 
-    private data class TimestampGap(
-        val discrepancyFrames: Long,
-        val estimatedGapMillis: Long,
-    )
-
     private class StorageReserveReachedException :
         IllegalStateException("The protected 1 GiB storage reserve has been reached.")
-
-    private class AudioTimestampGapDetector {
-        private var previousFramePosition: Long? = null
-        private var previousNanos: Long? = null
-
-        fun observe(timestamp: AudioTimestamp?): TimestampGap? {
-            if (timestamp == null) return null
-            val priorFrames = previousFramePosition
-            val priorNanos = previousNanos
-            previousFramePosition = timestamp.framePosition
-            previousNanos = timestamp.nanoTime
-            if (priorFrames == null || priorNanos == null) return null
-
-            val frameDelta = timestamp.framePosition - priorFrames
-            val nanosDelta = timestamp.nanoTime - priorNanos
-            if (nanosDelta <= 0L) {
-                return TimestampGap(
-                    discrepancyFrames = TIMESTAMP_GAP_THRESHOLD_FRAMES,
-                    estimatedGapMillis = TIMESTAMP_GAP_THRESHOLD_MILLIS,
-                )
-            }
-            val expectedFrames = nanosDelta * SAMPLE_RATE_HZ / NANOS_PER_SECOND
-            val discrepancy = abs(frameDelta - expectedFrames)
-            if (frameDelta >= 0L && discrepancy < TIMESTAMP_GAP_THRESHOLD_FRAMES) {
-                return null
-            }
-            return TimestampGap(
-                discrepancyFrames = discrepancy.coerceAtLeast(
-                    TIMESTAMP_GAP_THRESHOLD_FRAMES,
-                ),
-                estimatedGapMillis = (
-                    discrepancy * 1_000L / SAMPLE_RATE_HZ
-                    ).coerceAtLeast(TIMESTAMP_GAP_THRESHOLD_MILLIS),
-            )
-        }
-
-        fun reset() {
-            previousFramePosition = null
-            previousNanos = null
-        }
-    }
-
-    private class ShortRingBuffer(capacity: Int) {
-        private val samples = ShortArray(capacity.coerceAtLeast(1))
-        private var writeIndex = 0
-        private var available = 0
-
-        fun append(source: ShortArray) {
-            var sourceOffset = 0
-            var remaining = source.size
-            while (remaining > 0) {
-                val copyCount = min(remaining, samples.size - writeIndex)
-                source.copyInto(
-                    destination = samples,
-                    destinationOffset = writeIndex,
-                    startIndex = sourceOffset,
-                    endIndex = sourceOffset + copyCount,
-                )
-                writeIndex = (writeIndex + copyCount) % samples.size
-                sourceOffset += copyCount
-                remaining -= copyCount
-                available = min(samples.size, available + copyCount)
-            }
-        }
-
-        fun snapshot(): ShortArray {
-            if (available == 0) return ShortArray(0)
-            val result = ShortArray(available)
-            val start = (writeIndex - available + samples.size) % samples.size
-            val firstCopy = min(available, samples.size - start)
-            samples.copyInto(
-                destination = result,
-                destinationOffset = 0,
-                startIndex = start,
-                endIndex = start + firstCopy,
-            )
-            if (firstCopy < available) {
-                samples.copyInto(
-                    destination = result,
-                    destinationOffset = firstCopy,
-                    startIndex = 0,
-                    endIndex = available - firstCopy,
-                )
-            }
-            return result
-        }
-
-        fun clear() {
-            writeIndex = 0
-            available = 0
-        }
-    }
 
     private companion object {
         const val SAMPLE_RATE_HZ = 16_000
@@ -1352,17 +1268,12 @@ class AudioCaptureEngine(
         const val WAV_HEADER_BYTES = 44L
         const val PCM16_SCALE = 32_768f
         const val BUFFERED_FRAMES = 8
-        const val PRE_ROLL_SAMPLES = SAMPLE_RATE_HZ * 2
         const val ZERO_READ_BACKOFF_MILLIS = 10L
         const val CUE_COMPLETION_GRACE_MILLIS = 500L
 
         const val VAD_THRESHOLD = 0.5f
 
         const val AUDIO_TIMESTAMP_POLL_MILLIS = 1_000L
-        const val TIMESTAMP_GAP_THRESHOLD_FRAMES = FRAME_SAMPLES * 2L
-        const val TIMESTAMP_GAP_THRESHOLD_MILLIS =
-            TIMESTAMP_GAP_THRESHOLD_FRAMES * 1_000L / SAMPLE_RATE_HZ
-        const val NANOS_PER_SECOND = 1_000_000_000L
         const val NANOS_PER_MILLISECOND = 1_000_000L
         const val HEARTBEAT_MILLIS = 60_000L
         const val SAFETY_DEADLINE_MILLIS = 14L * 60L * 60L * 1_000L

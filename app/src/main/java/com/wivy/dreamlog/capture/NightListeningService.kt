@@ -384,22 +384,7 @@ class NightListeningService : Service(), AudioCaptureListener {
                 )
                 journal?.appendEvent(
                     type = "audio_gap",
-                    attributes = buildMap {
-                        put(
-                            "discrepancy_frames",
-                            event.discrepancyFrames.toString(),
-                        )
-                        put(
-                            "estimated_gap_millis",
-                            event.estimatedGapMillis.toString(),
-                        )
-                        event.activeSessionId?.let { sessionId ->
-                            put("session_id", sessionId)
-                        }
-                        event.sessionSampleOffset?.let { sampleOffset ->
-                            put("session_sample_offset", sampleOffset.toString())
-                        }
-                    },
+                    attributes = confirmedAudioGapAttributes(event),
                 )
             }
 
@@ -863,6 +848,23 @@ class NightListeningService : Service(), AudioCaptureListener {
                     requireUtcOffsetSeconds(it)
                 },
             )
+    }
+}
+
+internal fun confirmedAudioGapAttributes(
+    event: AudioCaptureEvent.AudioGap,
+): Map<String, String> = buildMap {
+    put("discrepancy_frames", event.discrepancyFrames.toString())
+    put("estimated_gap_millis", event.estimatedGapMillis.toString())
+    put(
+        AudioGapEvidence.ATTRIBUTE_KEY,
+        AudioGapEvidence.CONFIRMED_PERSISTENT_TIMESTAMP_DEFICIT,
+    )
+    event.activeSessionId?.let { sessionId ->
+        put("session_id", sessionId)
+    }
+    event.sessionSampleOffset?.let { sampleOffset ->
+        put("session_sample_offset", sampleOffset.toString())
     }
 }
 

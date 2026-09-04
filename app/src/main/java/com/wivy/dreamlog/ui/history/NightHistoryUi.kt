@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -39,12 +40,16 @@ import androidx.compose.ui.unit.dp
 import com.wivy.dreamlog.capture.CueAudioPreflight
 import com.wivy.dreamlog.capture.SessionIncompleteReason
 import com.wivy.dreamlog.capture.captureMicrophoneSilencedState
+import com.wivy.dreamlog.enrichment.EnrichmentFailureCode
 import com.wivy.dreamlog.enrichment.persistence.persistedEnrichmentFailureDisplayDetail
+import com.wivy.dreamlog.enrichment.persistence.persistedEnrichmentFailureCode
 import com.wivy.dreamlog.enrichment.persistence.persistedEnrichmentFailureIsRetryable
 import com.wivy.dreamlog.history.AudioEvidenceState
+import com.wivy.dreamlog.history.CaptureIssueFingerprint
 import com.wivy.dreamlog.history.CaptureSessionEntity
 import com.wivy.dreamlog.history.HistoryFormatters
 import com.wivy.dreamlog.history.NightCaptureState
+import com.wivy.dreamlog.history.NightAudioArtifactInspection
 import com.wivy.dreamlog.history.NightEventEntity
 import com.wivy.dreamlog.history.NightRecord
 import com.wivy.dreamlog.history.ProcessingState
@@ -97,7 +102,11 @@ fun MorningSummaryCard(
         )
         SummaryRow(
             "Enrichment",
-            enrichmentProcessingText(night.enrichmentState, night.enrichmentFailure),
+            enrichmentProcessingText(
+                night.enrichmentState,
+                night.enrichmentFailure,
+                night.transcriptionState,
+            ),
         )
 
         if (night.reportedSessionCount == 0) {
@@ -192,6 +201,18 @@ fun NightDetailScreen(
     onDeleteWholeNight: (String, (String?) -> Unit) -> Unit = { _, completion ->
         completion("Whole-night deletion is unavailable.")
     },
+    onMarkCaptureIssueReviewed: (String, (String?) -> Unit) -> Unit = { _, completion ->
+        completion("Capture issue review is unavailable.")
+    },
+    onShowCaptureIssueAgain: (String, (String?) -> Unit) -> Unit = { _, completion ->
+        completion("Capture issue review is unavailable.")
+    },
+    onInspectNightAudio: (
+        String,
+        (NightAudioArtifactInspection?, String?) -> Unit,
+    ) -> Unit = { _, completion ->
+        completion(null, "Saved-audio inspection is unavailable.")
+    },
 ) {
     val context = LocalContext.current
     val activity = context as? ComponentActivity
@@ -200,6 +221,12 @@ fun NightDetailScreen(
         RawSessionPlayer(context) { playbackState = it }
     }
     var technicalDetailsExpanded by remember(record?.night?.nightId) { mutableStateOf(false) }
+    var captureIssueReviewMessage by remember(record?.night?.nightId) {
+        mutableStateOf<String?>(null)
+    }
+    var audioInspectionMessage by remember(record?.night?.nightId) {
+        mutableStateOf<String?>(null)
+    }
     val reviewActionsBlocked =
         captureActive || localProcessingActive || archiveMutationRunning
 
@@ -297,7 +324,32 @@ fun NightDetailScreen(
                 }
                 if (technicalDetailsExpanded) {
                     item {
-                        NightDetailSummary(record)
+                        NightDetailSummary(
+                            record = record,
+                            actionsBlocked = reviewActionsBlocked,
+                            reviewMessage = captureIssueReviewMessage,
+                            audioInspectionMessage = audioInspectionMessage,
+                            onMarkCaptureIssueReviewed = {
+                                onMarkCaptureIssueReviewed(record.night.nightId) { error ->
+                                    captureIssueReviewMessage = error
+                                        ?: "Capture evidence marked reviewed. It remains preserved below."
+                                }
+                            },
+                            onShowCaptureIssueAgain = {
+                                onShowCaptureIssueAgain(record.night.nightId) { error ->
+                                    captureIssueReviewMessage = error
+                                        ?: "Capture evidence will be shown as an issue again."
+                                }
+                            },
+                            onInspectNightAudio = {
+                                audioInspectionMessage = "Checking saved audio files…"
+                                onInspectNightAudio(record.night.nightId) { inspection, error ->
+                                    audioInspectionMessage = error
+                                        ?: inspection?.let(::nightAudioInspectionText)
+                                        ?: "The saved-audio check returned no result."
+                                }
+                            },
+                        )
                     }
                     item {
                         RawTranscriptSection(
@@ -471,8 +523,7 @@ private fun NightOutcomeSummary(
             }
 
             record.night.enrichmentState == ProcessingState.FAILED -> WarningText(
-                "Dream generation failed. Return Home and choose Enrich to retry; the completed " +
-                    "raw transcript was preserved.",
+                enrichmentFailureWarningText(record.night.enrichmentFailure),
             )
 
             captureEvidence(record) != null -> WarningText(
@@ -489,6 +540,25 @@ private fun NightOutcomeSummary(
         }
     }
 }
+
+internal fun enrichmentFailureWarningText(failure: String?): String =
+    when {
+        persistedEnrichmentFailureIsRetryable(failure) ->
+            "Dream generation failed. Return Home and choose Enrich to retry; the completed " +
+                "raw transcript was preserved."
+
+        persistedEnrichmentFailureCode(failure) ==
+            EnrichmentFailureCode.RAW_SOURCE_UNAVAILABLE.persistedValue ->
+            "Dream generation failed. The raw transcript was not fully available, so this " +
+                "failure cannot be retried from this night."
+
+        persistedEnrichmentFailureCode(failure) ==
+            EnrichmentFailureCode.INVALID_SOURCE.persistedValue ->
+            "Dream generation failed. The ordered raw transcript source was invalid, so this " +
+                "failure cannot be retried from this night."
+
+        else -> "Dream generation failed. This failure cannot be retried from this night."
+    }
 
 internal data class NightOutcomeResumeAction(
     val completedCount: Int,
@@ -526,8 +596,18 @@ internal fun nightOutcomeResumeAction(record: NightRecord): NightOutcomeResumeAc
 }
 
 @Composable
-private fun NightDetailSummary(record: NightRecord) {
+private fun NightDetailSummary(
+    record: NightRecord,
+    actionsBlocked: Boolean,
+    reviewMessage: String?,
+    audioInspectionMessage: String?,
+    onMarkCaptureIssueReviewed: () -> Unit,
+    onShowCaptureIssueAgain: () -> Unit,
+    onInspectNightAudio: () -> Unit,
+) {
     val night = record.night
+    val captureEvidenceDisplay = captureEvidenceText(record)
+    val captureIssueReviewed = CaptureIssueFingerprint.isReviewed(record)
     HistoryCard(title = "Capture and processing") {
         SummaryRow("Night", HistoryFormatters.date(night.displayDate))
         SummaryRow("Status", nightStatus(night.captureState, night.interrupted))
@@ -561,9 +641,41 @@ private fun NightDetailSummary(record: NightRecord) {
         )
         SummaryRow(
             "Enrichment",
-            enrichmentProcessingText(night.enrichmentState, night.enrichmentFailure),
+            enrichmentProcessingText(
+                night.enrichmentState,
+                night.enrichmentFailure,
+                night.transcriptionState,
+            ),
         )
-        captureEvidence(record)?.let { WarningText(it) }
+        captureEvidenceDisplay?.let { evidence ->
+            if (captureIssueReviewed) {
+                SupportingText(evidence)
+                TextButton(
+                    onClick = onShowCaptureIssueAgain,
+                    enabled = !actionsBlocked,
+                ) {
+                    Text("Show as issue again")
+                }
+            } else {
+                WarningText(evidence)
+                TextButton(
+                    onClick = onMarkCaptureIssueReviewed,
+                    enabled = !actionsBlocked,
+                ) {
+                    Text("Mark reviewed")
+                }
+            }
+        }
+        reviewMessage?.let { message ->
+            SupportingText(message)
+        }
+        TextButton(
+            onClick = onInspectNightAudio,
+            enabled = !actionsBlocked && canInspectNightAudio(record),
+        ) {
+            Text("Check saved audio files")
+        }
+        audioInspectionMessage?.let { message -> SupportingText(message) }
         night.importWarning?.let { WarningText(it) }
         if (night.reportedSessionCount == 0) {
             SupportingText(
@@ -573,6 +685,113 @@ private fun NightDetailSummary(record: NightRecord) {
         }
     }
 }
+
+internal fun nightAudioInspectionText(
+    inspection: NightAudioArtifactInspection,
+): String {
+    if (!inspection.directoryPresent) {
+        return if (inspection.recordedSessionCount == 0) {
+            "Saved audio check: this empty night has no saved audio directory. No files were changed."
+        } else {
+            "Saved audio check: this night's saved audio directory is missing. No files were changed."
+        }
+    }
+
+    val parts = mutableListOf<String>()
+    parts += when {
+        inspection.recordedSessionCount == 0 ->
+            "Saved audio check: this night has no recorded sessions."
+
+        inspection.recordedFinalValidCount == inspection.recordedSessionCount ->
+            "Saved audio check: all ${inspection.recordedSessionCount} recorded sessions have " +
+                "valid files."
+
+        inspection.recordedFinalValidCount == 1 ->
+            "Saved audio check: 1 of ${inspection.recordedSessionCount} recorded sessions has " +
+                "a valid file."
+
+        else ->
+            "Saved audio check: ${inspection.recordedFinalValidCount} of " +
+                "${inspection.recordedSessionCount} recorded sessions have valid files."
+    }
+
+    val missingRecorded =
+        inspection.recordedSessionCount - inspection.recordedFinalPresentCount
+    if (missingRecorded > 0) {
+        parts += if (missingRecorded == 1) {
+            "1 recorded audio file is missing."
+        } else {
+            "$missingRecorded recorded audio files are missing."
+        }
+    }
+    val invalidRecorded =
+        inspection.recordedFinalPresentCount - inspection.recordedFinalValidCount
+    if (invalidRecorded > 0) {
+        parts += if (invalidRecorded == 1) {
+            "1 recorded audio file could not be verified."
+        } else {
+            "$invalidRecorded recorded audio files could not be verified."
+        }
+    }
+    if (inspection.extraFinalizedCandidateCount > 0) {
+        parts += if (inspection.extraFinalizedCandidateCount == 1) {
+            "Found 1 additional finalized recording for this night."
+        } else {
+            "Found ${inspection.extraFinalizedCandidateCount} additional finalized recordings " +
+                "for this night."
+        }
+    }
+    if (inspection.partialFileCount > 0) {
+        parts += if (inspection.partialFileCount == 1) {
+            "Found 1 partial audio file."
+        } else {
+            "Found ${inspection.partialFileCount} partial audio files."
+        }
+    }
+    if (inspection.extraUnverifiedFinalCount > 0) {
+        parts += if (inspection.extraUnverifiedFinalCount == 1) {
+            "1 finalized file could not be verified."
+        } else {
+            "${inspection.extraUnverifiedFinalCount} finalized files could not be verified."
+        }
+    }
+    if (inspection.extraFinalizedOutsideNightCount > 0) {
+        parts += if (inspection.extraFinalizedOutsideNightCount == 1) {
+            "1 finalized recording is outside this night's time range."
+        } else {
+            "${inspection.extraFinalizedOutsideNightCount} finalized recordings are outside " +
+                "this night's time range."
+        }
+    }
+    if (inspection.metadataOnlyCount > 0) {
+        parts += if (inspection.metadataOnlyCount == 1) {
+            "1 metadata-only entry remains."
+        } else {
+            "${inspection.metadataOnlyCount} metadata-only entries remain."
+        }
+    }
+    if (inspection.metadataPartialCount > 0) {
+        parts += if (inspection.metadataPartialCount == 1) {
+            "1 unfinished metadata entry remains."
+        } else {
+            "${inspection.metadataPartialCount} unfinished metadata entries remain."
+        }
+    }
+
+    if (parts.size == 1) {
+        parts += "No additional finalized or partial audio was found."
+    } else {
+        parts += "No files were changed."
+    }
+    return parts.joinToString(" ")
+}
+
+internal fun canInspectNightAudio(record: NightRecord): Boolean =
+    record.night.endedAtEpochMillis != null &&
+        record.night.captureState in setOf(
+            NightCaptureState.ENDED,
+            NightCaptureState.INTERRUPTED,
+        )
 
 @Composable
 private fun SessionEvidenceSection(
@@ -602,6 +821,7 @@ private fun SessionEvidenceSection(
             record.sessions.forEachIndexed { index, session ->
                 SessionCard(
                     index = index,
+                    record = record,
                     session = session,
                     playbackState = playbackState,
                     playbackBlocked = playbackBlocked,
@@ -814,6 +1034,7 @@ private fun TranscriptCard(
 @Composable
 private fun SessionCard(
     index: Int,
+    record: NightRecord,
     session: CaptureSessionEntity,
     playbackState: RawSessionPlaybackState,
     playbackBlocked: Boolean,
@@ -860,9 +1081,7 @@ private fun SessionCard(
             )
             SummaryRow(
                 "Capture",
-                session.incompleteReason?.let {
-                    "Incomplete · ${humanizeReason(it)}"
-                } ?: "Complete",
+                sessionCaptureText(record, session),
             )
             SummaryRow(
                 "Audio",
@@ -991,8 +1210,13 @@ internal fun monitoringRange(record: NightRecord): String {
     return if (night.endedAtEpochMillis == null) "$start – not finalized" else "$start – $end"
 }
 
-internal fun dreamCountText(record: NightRecord): String =
-    if (record.dreams.size == 1) "1 dream" else "${record.dreams.size} dreams"
+internal fun dreamCountText(record: NightRecord): String = when {
+    record.dreams.size == 1 -> "1 dream"
+    record.dreams.isEmpty() && record.night.enrichmentState != ProcessingState.COMPLETE ->
+        "— dreams"
+
+    else -> "${record.dreams.size} dreams"
+}
 
 internal fun wakewordCountText(record: NightRecord): String =
     if (record.sessions.size == 1) "1 wakeword" else "${record.sessions.size} wakewords"
@@ -1023,11 +1247,20 @@ internal fun rawAudioText(record: NightRecord): String =
     }
 
 internal fun captureEvidence(record: NightRecord): String? {
+    return captureEvidenceText(record)?.takeUnless {
+        CaptureIssueFingerprint.isReviewed(record)
+    }
+}
+
+internal fun captureEvidenceText(record: NightRecord): String? {
     val evidence = morningDiagnostics(record)
-    return evidence.takeIf(List<String>::isNotEmpty)?.joinToString(
-        prefix = "Capture evidence: ",
-        separator = " · ",
-    )
+    if (evidence.isEmpty()) return null
+    val prefix = if (CaptureIssueFingerprint.isReviewed(record)) {
+        "Capture evidence (reviewed): "
+    } else {
+        "Capture evidence: "
+    }
+    return evidence.joinToString(prefix = prefix, separator = " · ")
 }
 
 internal fun historyProcessingFailure(record: NightRecord): String? = when {
@@ -1036,22 +1269,28 @@ internal fun historyProcessingFailure(record: NightRecord): String? = when {
     else -> null
 }
 
-internal fun historyStatus(record: NightRecord): String = when {
-    record.night.transcriptionState == ProcessingState.FAILED -> "Transcription failed"
-    record.night.enrichmentState == ProcessingState.FAILED -> "Enrichment failed"
-    captureEvidence(record) != null -> "Capture issue"
-    record.night.captureState == NightCaptureState.STARTING -> "Starting"
-    record.night.captureState == NightCaptureState.ACTIVE -> "Active"
-    record.night.transcriptionState == ProcessingState.RUNNING -> "Transcribing"
-    record.night.enrichmentState == ProcessingState.RUNNING -> "Enriching"
-    record.night.enrichmentState == ProcessingState.COMPLETE -> "Complete"
-    record.night.transcriptionState == ProcessingState.COMPLETE -> "Ready to enrich"
-    record.sessions.isEmpty() &&
-        record.night.captureState == NightCaptureState.ENDED &&
-        record.night.enrichmentState == ProcessingState.WAITING_FOR_TRANSCRIPTION ->
-        "Ready to enrich"
+internal fun historyStatus(record: NightRecord): String {
+    historyProcessingFailure(record)?.let { return it }
+    val processingStatus = when {
+        record.night.captureState == NightCaptureState.STARTING -> "Starting"
+        record.night.captureState == NightCaptureState.ACTIVE -> "Active"
+        record.night.transcriptionState == ProcessingState.RUNNING -> "Transcribing"
+        record.night.enrichmentState == ProcessingState.RUNNING -> "Enriching"
+        record.night.enrichmentState == ProcessingState.COMPLETE -> "Complete"
+        record.night.transcriptionState == ProcessingState.COMPLETE -> "Ready to enrich"
+        record.sessions.isEmpty() &&
+            record.night.captureState == NightCaptureState.ENDED &&
+            record.night.enrichmentState == ProcessingState.WAITING_FOR_TRANSCRIPTION ->
+            "Ready to enrich"
 
-    else -> "Processing"
+        else -> "Processing"
+    }
+    if (captureEvidence(record) == null) return processingStatus
+    return if (processingStatus == "Complete" || processingStatus == "Ready to enrich") {
+        "$processingStatus · Capture issue"
+    } else {
+        "Capture issue"
+    }
 }
 
 internal fun historyStatusIsError(record: NightRecord): Boolean =
@@ -1060,26 +1299,13 @@ internal fun historyStatusIsError(record: NightRecord): Boolean =
         captureEvidence(record) != null
 
 internal fun hasOwnerFacingCaptureIssue(record: NightRecord): Boolean {
-    val night = record.night
-    val persistedIncompleteSessionCount = record.sessions.count {
-        it.incompleteReason != null
-    }
-    return night.interrupted ||
-        night.captureState == NightCaptureState.INTERRUPTED ||
-        night.captureState == NightCaptureState.RECOVERY_REQUIRED ||
-        record.events.any { it.type == "capture_failure" } ||
-        record.sessions.any { session ->
-            session.audioState == AudioEvidenceState.MISSING ||
-                session.audioState == AudioEvidenceState.CORRUPT ||
-                session.audioState == AudioEvidenceState.PENDING_RECOVERY ||
-                (
-                    session.incompleteReason != null &&
-                        session.incompleteReason != SessionIncompleteReason.NIGHT_ENDED
-                    )
-        } ||
-        night.reportedIncompleteSessionCount > persistedIncompleteSessionCount ||
-        night.reportedSessionCount > record.sessions.size
+    return CaptureIssueFingerprint.hasOwnerFacingIssue(record)
 }
+
+internal fun hasUnreviewedCaptureIssue(record: NightRecord): Boolean =
+    CaptureIssueFingerprint.current(record)?.let {
+        it != record.night.captureIssueReviewedFingerprint
+    } == true
 
 internal fun morningDiagnostics(record: NightRecord): List<String> {
     if (!hasOwnerFacingCaptureIssue(record)) return emptyList()
@@ -1094,8 +1320,7 @@ internal fun morningDiagnostics(record: NightRecord): List<String> {
             add("monitoring was interrupted; review the end reason and incomplete sessions below")
         }
         val incompleteSessions = record.sessions.filter {
-            it.incompleteReason != null &&
-                it.incompleteReason != SessionIncompleteReason.NIGHT_ENDED
+            CaptureIssueFingerprint.isOwnerFacingIncompleteSession(record, it)
         }
         if (incompleteSessions.isNotEmpty()) {
             add(
@@ -1124,11 +1349,49 @@ internal fun morningDiagnostics(record: NightRecord): List<String> {
         }
         captureFailureDiagnostics(record.events).forEach(::add)
         silencingDiagnostic(record)?.let(::add)
-        if (record.events.any { it.type == "audio_gap" && !it.sessionId.isNullOrBlank() }) {
-            add("an audio gap was observed during an affected recollection")
-        }
+        audioGapDiagnostic(record.events)?.let(::add)
         heartbeatDiagnostic(record)?.let(::add)
     }
+}
+
+private fun audioGapDiagnostic(events: List<NightEventEntity>): String? {
+    val affected = events.filter {
+        !it.sessionId.isNullOrBlank() && CaptureIssueFingerprint.isConfirmedAudioGap(it)
+    }
+    if (affected.isEmpty()) return null
+
+    val largestEstimateMillis = affected.mapNotNull { event ->
+        decodePersistedEventAttributes(event.encodedAttributes)["estimated_gap_millis"]
+            ?.toLongOrNull()
+            ?.takeIf { it >= 0L }
+    }.maxOrNull()
+    return if (affected.size == 1) {
+        largestEstimateMillis?.let { estimate ->
+            "an estimated $estimate ms audio-clock discontinuity was observed during an " +
+                "affected recollection"
+        } ?: "an audio-clock discontinuity was observed during an affected recollection"
+    } else {
+        buildString {
+            append("${affected.size} audio-clock discontinuities were observed during affected ")
+            append("recollections")
+            largestEstimateMillis?.let { append("; the largest estimate was $it ms") }
+        }
+    }
+}
+
+internal fun sessionCaptureText(
+    record: NightRecord,
+    session: CaptureSessionEntity,
+): String = when {
+    session.incompleteReason == null -> "Complete"
+    session.incompleteReason == SessionIncompleteReason.AUDIO_GAP &&
+        CaptureIssueFingerprint.isConfirmedAudioGap(record, session.sessionId) ->
+        "May be incomplete · confirmed audio-clock deficit"
+
+    session.incompleteReason == SessionIncompleteReason.AUDIO_GAP ->
+        "Timestamp anomaly · capture gap unverified"
+
+    else -> "Incomplete · ${humanizeReason(session.incompleteReason)}"
 }
 
 private fun silencingDiagnostic(record: NightRecord): String? {
@@ -1402,18 +1665,37 @@ internal fun transcriptionProcessingText(record: NightRecord): String {
     )
 }
 
-internal fun enrichmentProcessingText(state: String, failure: String?): String =
+internal fun enrichmentProcessingText(
+    state: String,
+    failure: String?,
+    transcriptionState: String? = null,
+): String =
     processingText(
         state = state,
         failure = persistedEnrichmentFailureDisplayDetail(failure),
-        waitingText = "Waiting for transcription",
-        failedRetryable = persistedEnrichmentFailureIsRetryable(failure),
-        failedArtifactText = if (state == ProcessingState.FAILED) {
-            "The raw transcript was preserved"
+        waitingText = if (transcriptionState == ProcessingState.COMPLETE) {
+            "Ready to enrich"
         } else {
-            null
+            "Waiting for transcription"
         },
+        failedRetryable = persistedEnrichmentFailureIsRetryable(failure),
+        failedArtifactText = enrichmentFailureArtifactText(state, failure),
     )
+
+internal fun enrichmentFailureArtifactText(state: String, failure: String?): String? =
+    if (state != ProcessingState.FAILED) {
+        null
+    } else {
+        when (persistedEnrichmentFailureCode(failure)) {
+            EnrichmentFailureCode.RAW_SOURCE_UNAVAILABLE.persistedValue ->
+                "The raw transcript was not fully available"
+
+            EnrichmentFailureCode.INVALID_SOURCE.persistedValue ->
+                "The ordered raw transcript source was invalid"
+
+            else -> "The raw transcript was preserved"
+        }
+    }
 
 private fun nightStatus(
     captureState: String,

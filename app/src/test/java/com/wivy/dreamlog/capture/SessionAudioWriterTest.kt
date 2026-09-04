@@ -114,6 +114,51 @@ class SessionAudioWriterTest {
     }
 
     @Test
+    fun artifactInspectionReportsCanonicalAudioWithoutMutatingFiles() {
+        val directory = temporaryFolder.newFolder("artifact-inspection")
+        val validWriter = writer(directory, DISCOVERY_VALID_ID) { 2_000L }
+        val validSession = validWriter.startSession(shortArrayOf(1), startedAtEpochMillis = 1_000L)
+        validSession.markCueStart()
+        validSession.append(shortArrayOf(2))
+        validSession.markCueEnd()
+        val valid = validSession.finalizeComplete(automaticSilenceTailSampleCount = 1L)
+
+        val corruptWriter = writer(directory, DISCOVERY_CORRUPT_ID) { 4_000L }
+        val corruptSession = corruptWriter.startSession(shortArrayOf(3), startedAtEpochMillis = 3_000L)
+        corruptSession.markCueStart()
+        corruptSession.append(shortArrayOf(4))
+        corruptSession.markCueEnd()
+        val corrupt = corruptSession.finalizeComplete(automaticSilenceTailSampleCount = 1L)
+        RandomAccessFile(File(directory, corrupt.audioFileName), "rw").use { audio ->
+            audio.seek(0L)
+            audio.writeBytes("NOPE")
+        }
+
+        val partialWriter = writer(directory, ORPHAN_ID) { 5_000L }
+        val partial = partialWriter.startSession(shortArrayOf(5), startedAtEpochMillis = 5_000L)
+        val partialName = partial.checkpoint().partialFileName
+        File(directory, "not-writer-owned.wav").writeBytes(byteArrayOf(1, 2, 3))
+        val namesBefore = directory.listFiles().orEmpty().map(File::getName).sorted()
+
+        val inventory = writer(directory, UNUSED_ID).inspectArtifacts()
+
+        assertTrue(inventory.directoryPresent)
+        assertEquals(setOf(valid.audioFileName, corrupt.audioFileName), inventory.finalFileNames)
+        assertEquals(setOf(valid.audioFileName), inventory.validFinalFileNames)
+        assertEquals(setOf(partialName), inventory.partialFileNames)
+        assertEquals(
+            setOf(
+                valid.audioFileName.removeSuffix(".wav") + ".properties",
+                corrupt.audioFileName.removeSuffix(".wav") + ".properties",
+            ),
+            inventory.metadataFileNames,
+        )
+        assertTrue(inventory.metadataPartialFileNames.isEmpty())
+        assertEquals(namesBefore, directory.listFiles().orEmpty().map(File::getName).sorted())
+        partial.finalizeIncomplete(SessionIncompleteReason.NIGHT_ENDED)
+    }
+
+    @Test
     fun constructionCreatesNoIdleWriterAndSessionNameIsOpaque() {
         val directory = File(temporaryFolder.root, "not-created-yet")
         val writer = writer(directory, OPAQUE_ID)

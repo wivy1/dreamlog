@@ -1,7 +1,10 @@
 package com.wivy.dreamlog
 
 import com.wivy.dreamlog.enrichment.EnrichmentModelPhase
+import com.wivy.dreamlog.enrichment.EnrichmentInterruptionCause
 import com.wivy.dreamlog.enrichment.EnrichmentRuntimePhase
+import com.wivy.dreamlog.enrichment.shouldReportRecoveredEnrichmentInterruption
+import com.wivy.dreamlog.history.ProcessingState
 import com.wivy.dreamlog.transcription.TranscriptionModelPhase
 import com.wivy.dreamlog.transcription.TranscriptionRuntimePhase
 import org.junit.Assert.assertEquals
@@ -28,6 +31,70 @@ class MainActivityReprocessStateTest {
                 enrichmentPhase = EnrichmentRuntimePhase.IDLE,
             ),
         )
+    }
+
+    @Test
+    fun foregroundLossDistinguishesHiddenAppFromScreenOffOrLock() {
+        assertEquals(
+            EnrichmentInterruptionCause.APP_HIDDEN,
+            enrichmentForegroundLossCause(
+                screenInteractive = true,
+                keyguardLocked = false,
+            ),
+        )
+        listOf(
+            false to false,
+            false to true,
+            true to true,
+        ).forEach { (interactive, locked) ->
+            assertEquals(
+                EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED,
+                enrichmentForegroundLossCause(
+                    screenInteractive = interactive,
+                    keyguardLocked = locked,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun recoveredEnrichmentInterruptionIsReportedWhenRunsWereRecovered() {
+        assertTrue(
+            shouldReportRecoveredEnrichmentInterruption(
+                recoveredRunCount = 1,
+                requestedNightStates = listOf(ProcessingState.COMPLETE),
+            ),
+        )
+    }
+
+    @Test
+    fun recoveredEnrichmentInterruptionSuppressesStaleWarningWhenAllNightsCompleted() {
+        assertFalse(
+            shouldReportRecoveredEnrichmentInterruption(
+                recoveredRunCount = 0,
+                requestedNightStates = listOf(
+                    ProcessingState.COMPLETE,
+                    ProcessingState.COMPLETE,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun recoveredEnrichmentInterruptionIsReportedForUnfinishedOrUnknownNights() {
+        listOf(
+            ProcessingState.WAITING_FOR_TRANSCRIPTION,
+            ProcessingState.FAILED,
+            null,
+        ).forEach { state ->
+            assertTrue(
+                "Expected a report for state=$state",
+                shouldReportRecoveredEnrichmentInterruption(
+                    recoveredRunCount = 0,
+                    requestedNightStates = listOf(ProcessingState.COMPLETE, state),
+                ),
+            )
+        }
     }
 
     @Test

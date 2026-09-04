@@ -105,7 +105,7 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
 
         private const val CURRENT_LOCALE_TAG = "en-US"
         private const val CURRENT_ENGINE_ID = "sherpa-onnx-offline-transducer"
-        private const val CURRENT_ENGINE_VERSION = "12"
+        private const val CURRENT_ENGINE_VERSION = "13"
         private const val CURRENT_RUNTIME_ID = "sherpa-onnx"
         private const val SHERPA_RUNTIME_VERSION = "1.13.4"
         private const val MILLIS_PER_SECOND = 1_000L
@@ -130,6 +130,7 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
         val recognitionStartSample = recognitionRange?.startSample ?: 0L
         val recognitionEndSample = recognitionRange?.endSampleExclusive ?: source.sampleCount
         val contentStartSample = input?.contentStartSample ?: recognitionStartSample
+        val triggerReportSample = input?.triggerReportSample
         require(recognitionStartSample in 0L..source.sampleCount) {
             "Recognition start is outside the source audio."
         }
@@ -138,6 +139,12 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
         }
         require(contentStartSample in recognitionStartSample..recognitionEndSample) {
             "Recognition content start is outside the resolved audio."
+        }
+        require(
+            triggerReportSample == null ||
+                triggerReportSample in recognitionStartSample..contentStartSample
+        ) {
+            "Recognition trigger report is outside the resolved wake context."
         }
         if (recognitionEndSample == recognitionStartSample) {
             return TranscriptionResult(rawText = "", segments = emptyList())
@@ -150,17 +157,34 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
             maxDecodeSampleCount = MAX_DECODE_SAMPLE_COUNT.toLong(),
             sampleRateHz = source.sampleRateHz,
         )
+        val triggerWindowIndex = input?.triggeringWakePhrase?.let {
+            if (triggerReportSample == null) {
+                0
+            } else {
+                decodeRanges.indexOfFirst { range ->
+                    (
+                        triggerReportSample == recognitionStartSample &&
+                            range.startSample == recognitionStartSample
+                        ) || (
+                        triggerReportSample > range.startSample &&
+                            triggerReportSample <= range.endSampleExclusive
+                        )
+                }
+            }
+        }
         val results = decodeRanges.mapIndexed { index, range ->
             val windowContentStart = contentStartSample.coerceIn(
                 range.startSample,
                 range.endSampleExclusive,
             )
+            val windowHasTrigger = index == triggerWindowIndex
             decodeCompleteWindow(
                 source = source,
                 recognitionStartSample = range.startSample,
                 recognitionEndSample = range.endSampleExclusive,
                 contentStartSample = windowContentStart,
-                triggeringWakePhrase = input?.triggeringWakePhrase.takeIf { index == 0 },
+                triggeringWakePhrase = input?.triggeringWakePhrase.takeIf { windowHasTrigger },
+                triggerReportSample = triggerReportSample.takeIf { windowHasTrigger },
             )
         }
         return TranscriptionResult(
@@ -179,6 +203,7 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
         recognitionEndSample: Long,
         contentStartSample: Long,
         triggeringWakePhrase: TriggeringWakePhrase? = null,
+        triggerReportSample: Long? = null,
     ): TranscriptionResult {
         check(recognitionEndSample - recognitionStartSample <= MAX_DECODE_SAMPLE_COUNT) {
             "A local transcription decode exceeded its fixed waveform limit."
@@ -205,6 +230,12 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
                 source.sampleRateHz,
             ),
             triggeringWakePhrase = triggeringWakePhrase,
+            triggerReportMillis = triggerReportSample?.let { reportSample ->
+                samplesToMillis(
+                    reportSample - recognitionStartSample,
+                    source.sampleRateHz,
+                )
+            },
         )
         return result.copy(
             segments = result.segments.map { segment ->

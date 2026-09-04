@@ -23,6 +23,94 @@ class NightRepositoryTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun captureIssueReviewPersistsOnlyFingerprintAndCanBeShownAgain() {
+        val fixture = fixture("capture-issue-review")
+        val night = endedNightForDeletion("capture-issue-review-night", 1_000L).copy(
+            captureState = NightCaptureState.INTERRUPTED,
+            endReason = "process_interrupted",
+            interrupted = true,
+            reportedIncompleteSessionCount = 1,
+        )
+        val session = retainedSessionForDeletion(
+            nightId = night.nightId,
+            sessionId = "capture-issue-review-session",
+            audioFileName = "capture-issue-review-session.wav",
+        ).copy(incompleteReason = "audio_read")
+        fixture.dao.seed(night, session)
+        val repository = fixture.repository(journal(fixture.journalRoot) { 2_000L })
+        val before = requireNotNull(repository.readNight(night.nightId))
+        val fingerprint = requireNotNull(CaptureIssueFingerprint.current(before))
+
+        assertTrue(repository.markCaptureIssueReviewed(night.nightId))
+
+        val reviewed = requireNotNull(fixture.dao.readNight(night.nightId))
+        assertEquals(fingerprint, reviewed.night.captureIssueReviewedFingerprint)
+        assertEquals(night.captureState, reviewed.night.captureState)
+        assertEquals(
+            night.reportedIncompleteSessionCount,
+            reviewed.night.reportedIncompleteSessionCount,
+        )
+        assertEquals(session, reviewed.sessions.single())
+        assertFalse(repository.markCaptureIssueReviewed(night.nightId))
+
+        assertTrue(repository.showCaptureIssueAgain(night.nightId))
+        assertNull(fixture.dao.readNight(night.nightId)?.night?.captureIssueReviewedFingerprint)
+        assertFalse(repository.showCaptureIssueAgain(night.nightId))
+    }
+
+    @Test
+    fun endedNightAudioInspectionFindsExtraFinalizedAndPartialFilesWithoutMutation() {
+        val fixture = fixture("audio-artifact-inspection")
+        val audioDirectory = File(fixture.audioRoot, AUDIO_INSPECTION_NIGHT_ID)
+        var now = 1_000L
+        val writer = writer(
+            directory = audioDirectory,
+            sessionIds = listOf(
+                AUDIO_INSPECTION_RECORDED_SESSION_ID,
+                AUDIO_INSPECTION_EXTRA_SESSION_ID,
+                AUDIO_INSPECTION_PARTIAL_SESSION_ID,
+            ),
+            clock = { now },
+        )
+        val recorded = completeSession(
+            writer = writer,
+            startedAtEpochMillis = 1_010L,
+            finalizedAtEpochMillis = 1_020L,
+            setClock = { now = it },
+        )
+        completeSession(
+            writer = writer,
+            startedAtEpochMillis = 1_030L,
+            finalizedAtEpochMillis = 1_040L,
+            setClock = { now = it },
+        )
+        val partial = writer.startSession(
+            preRoll = shortArrayOf(3),
+            startedAtEpochMillis = 1_045L,
+        )
+        val night = endedNightForDeletion(AUDIO_INSPECTION_NIGHT_ID, 1_000L)
+        fixture.dao.seed(night, recorded.toEntity(night.nightId, captureOrder = 0))
+        val namesBefore = audioDirectory.listFiles().orEmpty().map(File::getName).sorted()
+
+        val inspection = fixture.repository(
+            journal(fixture.journalRoot) { 2_000L },
+        ).inspectEndedNightAudio(night.nightId)
+
+        assertTrue(inspection.directoryPresent)
+        assertEquals(1, inspection.recordedSessionCount)
+        assertEquals(1, inspection.recordedFinalPresentCount)
+        assertEquals(1, inspection.recordedFinalValidCount)
+        assertEquals(1, inspection.extraFinalizedCandidateCount)
+        assertEquals(0, inspection.extraFinalizedOutsideNightCount)
+        assertEquals(0, inspection.extraUnverifiedFinalCount)
+        assertEquals(1, inspection.partialFileCount)
+        assertEquals(0, inspection.metadataOnlyCount)
+        assertEquals(0, inspection.metadataPartialCount)
+        assertEquals(namesBefore, audioDirectory.listFiles().orEmpty().map(File::getName).sorted())
+        partial.finalizeIncomplete(SessionIncompleteReason.NIGHT_ENDED)
+    }
+
+    @Test
     fun endedImportRecoversEighthFinalizedPostMidnightSessionInChronologicalOrder() {
         val fixture = fixture("orphan-eighth-session")
         val startedAt = epoch("2026-08-11T04:30:00Z")
@@ -1103,6 +1191,15 @@ class NightRepositoryTest {
             return 1
         }
 
+        override fun updateCaptureIssueReviewedFingerprint(
+            nightId: String,
+            fingerprint: String?,
+        ): Int {
+            val night = nights[nightId] ?: return 0
+            nights[nightId] = night.copy(captureIssueReviewedFingerprint = fingerprint)
+            return 1
+        }
+
         override fun deleteNight(nightId: String): Int {
             if (nights.remove(nightId) == null) return 0
             sessions.entries.removeIf { it.value.nightId == nightId }
@@ -1165,6 +1262,10 @@ class NightRepositoryTest {
         const val INVALID_ORPHAN_NIGHT_ID = "00000000000000000000000000000064"
         const val PROTECTED_ORPHAN_NIGHT_ID = "00000000000000000000000000000065"
         const val EFFECTIVE_SILENCING_NIGHT_ID = "00000000000000000000000000000068"
+        const val AUDIO_INSPECTION_NIGHT_ID = "00000000000000000000000000000069"
+        const val AUDIO_INSPECTION_RECORDED_SESSION_ID = "000000000000000000000000000000a1"
+        const val AUDIO_INSPECTION_EXTRA_SESSION_ID = "000000000000000000000000000000a2"
+        const val AUDIO_INSPECTION_PARTIAL_SESSION_ID = "000000000000000000000000000000a3"
         val ORPHAN_EIGHTH_SESSION_IDS = listOf(
             "00000000000000000000000000000071",
             "00000000000000000000000000000072",

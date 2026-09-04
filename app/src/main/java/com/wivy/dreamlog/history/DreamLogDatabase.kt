@@ -18,7 +18,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         DreamEntity::class,
         DreamSourceSpanEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 abstract class DreamLogDatabase : RoomDatabase() {
@@ -227,6 +227,17 @@ abstract class DreamLogDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    ALTER TABLE `nights`
+                    ADD COLUMN `captureIssueReviewedFingerprint` TEXT
+                    """.trimIndent(),
+                )
+            }
+        }
+
         fun get(context: Context): DreamLogDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -238,6 +249,7 @@ abstract class DreamLogDatabase : RoomDatabase() {
                     MIGRATION_2_3,
                     MIGRATION_3_4,
                     MIGRATION_4_5,
+                    MIGRATION_5_6,
                 )
                     .build()
                     .also { instance = it }

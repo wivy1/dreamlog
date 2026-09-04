@@ -132,6 +132,12 @@ fun interface EnrichmentOperationGate {
     fun tryAcquire(): EnrichmentOperationLease?
 }
 
+enum class EnrichmentInterruptionCause {
+    APP_HIDDEN,
+    SCREEN_OFF_OR_LOCKED,
+    USER_CANCELLED,
+}
+
 enum class EnrichmentFailureCode(
     val persistedValue: String,
     val safeDetail: String,
@@ -155,10 +161,40 @@ enum class EnrichmentFailureCode(
         "One capture exceeds this local model's context budget. The raw transcript remains available to retry after an app update.",
         false,
     ),
+    SOURCE_UNIT_TOO_LARGE(
+        "source_unit_too_large",
+        "One immutable transcript source unit exceeds the local enrichment request limit. The raw transcript remains available for review.",
+        false,
+    ),
     INVALID_SOURCE("invalid_source", "The ordered raw transcript source is invalid.", false),
     CLAIM_REJECTED("claim_rejected", "The enrichment attempt could not be claimed.", true),
     MODEL_LOAD_FAILED("model_load_failed", "The local enrichment model could not be loaded.", true),
     INFERENCE_FAILED("inference_failed", "Local enrichment inference stopped.", true),
+    APP_HIDDEN(
+        "app_hidden",
+        "Enrichment stopped because DreamLog was hidden. The raw transcript remains reviewable.",
+        true,
+    ),
+    SCREEN_OFF_OR_LOCKED(
+        "screen_off_or_locked",
+        "Enrichment stopped when the screen turned off or the phone was locked. The raw transcript remains reviewable.",
+        true,
+    ),
+    USER_CANCELLED(
+        "user_cancelled",
+        "Enrichment was stopped before completion. The raw transcript remains reviewable.",
+        true,
+    ),
+    UNKNOWN_PROCESS_LOSS(
+        "unknown_process_loss",
+        "DreamLog stopped before enrichment completed. The raw transcript remains reviewable.",
+        true,
+    ),
+    UNEXPECTED_FAILURE(
+        "unexpected_failure",
+        "Local enrichment stopped unexpectedly. The raw transcript remains reviewable.",
+        true,
+    ),
     OUTPUT_INVALID(
         "output_invalid",
         "The local model output failed source and schema validation.",
@@ -170,6 +206,16 @@ enum class EnrichmentFailureCode(
         true,
     ),
 }
+
+internal fun EnrichmentInterruptionCause.failureCode(): EnrichmentFailureCode = when (this) {
+    EnrichmentInterruptionCause.APP_HIDDEN -> EnrichmentFailureCode.APP_HIDDEN
+    EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED ->
+        EnrichmentFailureCode.SCREEN_OFF_OR_LOCKED
+    EnrichmentInterruptionCause.USER_CANCELLED -> EnrichmentFailureCode.USER_CANCELLED
+}
+
+internal fun EnrichmentFailureCode.persistedFailureDetail(): String =
+    "$safeDetail [code=$persistedValue; retryable=$retryable]"
 
 sealed interface EnrichmentRunOutcome {
     val nightId: String
@@ -357,6 +403,9 @@ class NightEnrichmentCoordinator(
     private val engineFactory: EnrichmentEngineFactory,
     private val operationGate: EnrichmentOperationGate,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val interruptionCause: () -> EnrichmentInterruptionCause? = { null },
+    private val requestPartitioner: (OrderedNightTranscript) -> List<OrderedNightTranscript> =
+        OrderedNightTranscript::enrichmentRequestPartitions,
 ) {
     val requiresAppToRemainOpen: Boolean = true
     val operationState = AppOpenEnrichmentStateMachine()
@@ -366,9 +415,15 @@ class NightEnrichmentCoordinator(
     fun processNight(
         nightId: String,
         onProgress: (EnrichmentOperationSnapshot) -> Unit = {},
-    ): EnrichmentRunOutcome = processBatch(listOf(nightId)) { progress ->
-        onProgress(progress.operation)
-    }.outcomes.single()
+    ): EnrichmentRunOutcome {
+        val batch = processBatch(listOf(nightId)) { progress ->
+            onProgress(progress.operation)
+        }
+        return batch.outcomes.singleOrNull() ?: interruptionOutcome(
+            nightId = nightId,
+            rawFallbackAvailable = false,
+        )
+    }
 
     fun processBatch(
         nightIds: List<String>,
@@ -392,7 +447,23 @@ class NightEnrichmentCoordinator(
         var lease: EnrichmentOperationLease? = null
         val engineHolder = BatchEngineHolder()
         try {
+            interruptionCause()?.let { cause ->
+                markUnclaimedInterruption(requestedNightIds.first(), cause)
+                return EnrichmentBatchOutcome(
+                    requestedNightIds = requestedNightIds,
+                    outcomes = emptyList(),
+                    stoppedEarly = true,
+                )
+            }
             lease = operationGate.tryAcquire()
+            interruptionCause()?.let { cause ->
+                markUnclaimedInterruption(requestedNightIds.first(), cause)
+                return EnrichmentBatchOutcome(
+                    requestedNightIds = requestedNightIds,
+                    outcomes = emptyList(),
+                    stoppedEarly = true,
+                )
+            }
             if (lease == null) {
                 val firstNightId = requestedNightIds.first()
                 val callback: (EnrichmentOperationSnapshot) -> Unit = { operation ->
@@ -427,6 +498,12 @@ class NightEnrichmentCoordinator(
             var failedNightCount = 0
             var stoppedEarly = false
             for ((index, nightId) in requestedNightIds.withIndex()) {
+                val beforeNightCause = interruptionCause()
+                if (beforeNightCause != null) {
+                    markUnclaimedInterruption(nightId, beforeNightCause)
+                    stoppedEarly = true
+                    break
+                }
                 var terminalOperation: EnrichmentOperationSnapshot? = null
                 val outcome = processNightUnderLease(
                     nightId = nightId,
@@ -446,6 +523,10 @@ class NightEnrichmentCoordinator(
                             ),
                         )
                     }
+                }
+                if (outcome == null) {
+                    stoppedEarly = true
+                    break
                 }
                 outcomes += outcome
                 when (outcome) {
@@ -495,13 +576,31 @@ class NightEnrichmentCoordinator(
         rawFallbackAvailable = false,
     )
 
+    private fun interruptionOutcome(
+        nightId: String,
+        rawFallbackAvailable: Boolean,
+    ): EnrichmentRunOutcome.Failure {
+        val code = interruptionCause()?.failureCode()
+            ?: EnrichmentFailureCode.UNKNOWN_PROCESS_LOSS
+        return EnrichmentRunOutcome.Failure(
+            nightId = nightId,
+            code = code,
+            retryable = true,
+            rawFallbackAvailable = rawFallbackAvailable,
+        )
+    }
+
     private fun processNightUnderLease(
         nightId: String,
         engineHolder: BatchEngineHolder,
         onProgress: (EnrichmentOperationSnapshot) -> Unit,
-    ): EnrichmentRunOutcome {
+    ): EnrichmentRunOutcome? {
         var claim: EnrichmentAttemptClaim? = null
         var rawFallbackAvailable = false
+        interruptionCause()?.let { cause ->
+            publish(onProgress, markUnclaimedInterruption(nightId, cause))
+            return null
+        }
         publish(onProgress, operationState.begin(nightId))
         val source = try {
                 store.loadNightSource(nightId)
@@ -573,6 +672,17 @@ class NightEnrichmentCoordinator(
                 engine = engineFactory.metadata,
                 inferenceSkippedForEmptyInput = input.isEmpty,
             )
+            interruptionCause()?.let { cause ->
+                publish(
+                    onProgress,
+                    markUnclaimedInterruption(
+                        nightId = nightId,
+                        cause = cause,
+                        rawFallbackAvailable = true,
+                    ),
+                )
+                return null
+            }
             val startedAt = clock().coerceAtLeast(0L)
             claim = try {
                 store.claimAttempt(nightId, descriptor, startedAt)
@@ -591,6 +701,12 @@ class NightEnrichmentCoordinator(
                 null,
                 onProgress,
             )
+            interruptionFailure(
+                nightId = nightId,
+                rawFallbackAvailable = true,
+                claim = claim,
+                onProgress = onProgress,
+            )?.let { return it }
 
             val validated = if (input.isEmpty) {
                 ValidatedEnrichment(
@@ -600,21 +716,77 @@ class NightEnrichmentCoordinator(
                     dreams = emptyList(),
                 )
             } else {
-                val captureInputs = input.capturePartitions()
+                val captureInputs = try {
+                    requestPartitioner(input)
+                } catch (_: EnrichmentInputTooLargeException) {
+                    interruptionFailure(
+                        nightId = nightId,
+                        rawFallbackAvailable = true,
+                        claim = claim,
+                        onProgress = onProgress,
+                    )?.let { return it }
+                    return fail(
+                        nightId,
+                        EnrichmentFailureCode.SOURCE_UNIT_TOO_LARGE,
+                        true,
+                        claim,
+                        onProgress,
+                    )
+                } catch (_: Throwable) {
+                    interruptionFailure(
+                        nightId = nightId,
+                        rawFallbackAvailable = true,
+                        claim = claim,
+                        onProgress = onProgress,
+                    )?.let { return it }
+                    return fail(
+                        nightId,
+                        EnrichmentFailureCode.UNEXPECTED_FAILURE,
+                        true,
+                        claim,
+                        onProgress,
+                    )
+                }
                 val requests = try {
                     captureInputs.map { capture ->
                         EnrichmentPromptBuilder.build(capture, claim.attempt)
                     }
                 } catch (_: EnrichmentInputTooLargeException) {
+                    interruptionFailure(
+                        nightId = nightId,
+                        rawFallbackAvailable = true,
+                        claim = claim,
+                        onProgress = onProgress,
+                    )?.let { return it }
                     return fail(
                         nightId,
-                        EnrichmentFailureCode.INPUT_TOO_LARGE,
+                        EnrichmentFailureCode.SOURCE_UNIT_TOO_LARGE,
+                        true,
+                        claim,
+                        onProgress,
+                    )
+                } catch (_: Throwable) {
+                    interruptionFailure(
+                        nightId = nightId,
+                        rawFallbackAvailable = true,
+                        claim = claim,
+                        onProgress = onProgress,
+                    )?.let { return it }
+                    return fail(
+                        nightId,
+                        EnrichmentFailureCode.UNEXPECTED_FAILURE,
                         true,
                         claim,
                         onProgress,
                     )
                 }
                 val engine = engineHolder.engine ?: run {
+                    interruptionFailure(
+                        nightId = nightId,
+                        rawFallbackAvailable = true,
+                        claim = claim,
+                        onProgress = onProgress,
+                    )?.let { return it }
                     publish(
                         onProgress,
                         operationState.advance(
@@ -626,6 +798,12 @@ class NightEnrichmentCoordinator(
                     val opened = try {
                         engineFactory.open()
                     } catch (_: Throwable) {
+                        interruptionFailure(
+                            nightId = nightId,
+                            rawFallbackAvailable = true,
+                            claim = claim,
+                            onProgress = onProgress,
+                        )?.let { return it }
                         return fail(
                             nightId,
                             EnrichmentFailureCode.MODEL_LOAD_FAILED,
@@ -637,6 +815,12 @@ class NightEnrichmentCoordinator(
                     engineHolder.engine = opened
                     opened
                 }
+                interruptionFailure(
+                    nightId = nightId,
+                    rawFallbackAvailable = true,
+                    claim = claim,
+                    onProgress = onProgress,
+                )?.let { return it }
                 val responses = try {
                     publish(
                         onProgress,
@@ -646,8 +830,32 @@ class NightEnrichmentCoordinator(
                             true,
                         ),
                     )
-                    requests.map(engine::generate)
+                    val generated = mutableListOf<EnrichmentEngineResult>()
+                    for (request in requests) {
+                        val beforeGeneration = interruptionFailure(
+                            nightId = nightId,
+                            rawFallbackAvailable = true,
+                            claim = claim,
+                            onProgress = onProgress,
+                        )
+                        if (beforeGeneration != null) return beforeGeneration
+                        generated += engine.generate(request)
+                        val afterGeneration = interruptionFailure(
+                            nightId = nightId,
+                            rawFallbackAvailable = true,
+                            claim = claim,
+                            onProgress = onProgress,
+                        )
+                        if (afterGeneration != null) return afterGeneration
+                    }
+                    generated
                 } catch (_: EnrichmentInputTooLargeException) {
+                    interruptionFailure(
+                        nightId = nightId,
+                        rawFallbackAvailable = true,
+                        claim = claim,
+                        onProgress = onProgress,
+                    )?.let { return it }
                     return fail(
                         nightId,
                         EnrichmentFailureCode.INPUT_TOO_LARGE,
@@ -656,6 +864,12 @@ class NightEnrichmentCoordinator(
                         onProgress,
                     )
                 } catch (_: Throwable) {
+                    interruptionFailure(
+                        nightId = nightId,
+                        rawFallbackAvailable = true,
+                        claim = claim,
+                        onProgress = onProgress,
+                    )?.let { return it }
                     runCatching { engineHolder.engine?.close() }
                     engineHolder.engine = null
                     return fail(
@@ -666,6 +880,12 @@ class NightEnrichmentCoordinator(
                         onProgress,
                     )
                 }
+                interruptionFailure(
+                    nightId = nightId,
+                    rawFallbackAvailable = true,
+                    claim = claim,
+                    onProgress = onProgress,
+                )?.let { return it }
                 publish(
                     onProgress,
                     operationState.advance(
@@ -689,6 +909,12 @@ class NightEnrichmentCoordinator(
                         expectedAttempt = claim.attempt,
                     )
                 } catch (failure: EnrichmentOutputException) {
+                    interruptionFailure(
+                        nightId = nightId,
+                        rawFallbackAvailable = true,
+                        claim = claim,
+                        onProgress = onProgress,
+                    )?.let { return it }
                     return fail(
                         nightId,
                         EnrichmentFailureCode.OUTPUT_INVALID,
@@ -700,6 +926,12 @@ class NightEnrichmentCoordinator(
                 }
             }
 
+            interruptionFailure(
+                nightId = nightId,
+                rawFallbackAvailable = true,
+                claim = claim,
+                onProgress = onProgress,
+            )?.let { return it }
             publish(
                 onProgress,
                 operationState.advance(
@@ -733,6 +965,39 @@ class NightEnrichmentCoordinator(
                 inferenceSkippedForEmptyInput = input.isEmpty,
                 rawFallbackAvailable = true,
             )
+    }
+
+    private fun markUnclaimedInterruption(
+        nightId: String,
+        cause: EnrichmentInterruptionCause,
+        rawFallbackAvailable: Boolean = false,
+    ): EnrichmentOperationSnapshot {
+        if (
+            operationState.current().phase == EnrichmentOperationPhase.IDLE ||
+            operationState.current().phase in BATCH_TERMINAL_PHASES
+        ) {
+            operationState.begin(nightId)
+        }
+        return operationState.fail(
+            code = cause.failureCode(),
+            attempt = null,
+            rawFallbackAvailable = rawFallbackAvailable,
+        )
+    }
+
+    private fun interruptionFailure(
+        nightId: String,
+        rawFallbackAvailable: Boolean,
+        claim: EnrichmentAttemptClaim,
+        onProgress: (EnrichmentOperationSnapshot) -> Unit,
+    ): EnrichmentRunOutcome.Failure? = interruptionCause()?.let { cause ->
+        fail(
+            nightId = nightId,
+            code = cause.failureCode(),
+            rawFallbackAvailable = rawFallbackAvailable,
+            claim = claim,
+            onProgress = onProgress,
+        )
     }
 
     private fun fail(
@@ -797,6 +1062,10 @@ class NightEnrichmentCoordinator(
             EnrichmentFailureCode.MODEL_LOAD_FAILED,
             EnrichmentFailureCode.INFERENCE_FAILED,
             EnrichmentFailureCode.PERSISTENCE_FAILED,
+            EnrichmentFailureCode.APP_HIDDEN,
+            EnrichmentFailureCode.SCREEN_OFF_OR_LOCKED,
+            EnrichmentFailureCode.USER_CANCELLED,
+            EnrichmentFailureCode.UNKNOWN_PROCESS_LOSS,
         )
     }
 }

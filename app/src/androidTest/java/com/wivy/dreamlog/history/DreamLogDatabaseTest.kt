@@ -662,6 +662,7 @@ class DreamLogDatabaseTest {
             DreamLogDatabase.MIGRATION_2_3,
             DreamLogDatabase.MIGRATION_3_4,
             DreamLogDatabase.MIGRATION_4_5,
+            DreamLogDatabase.MIGRATION_5_6,
         )
             .build()
 

@@ -206,6 +206,315 @@ class EnrichmentDomainAndParserTest {
     }
 
     @Test
+    fun oversizedSingleCaptureUsesBoundedRequestPartitionsWithExactCoverage() {
+        val sourceSegments = (0 until 200).map { index ->
+            segment(
+                sessionId = "session-a",
+                sessionOrder = 0,
+                segmentIndex = index,
+                startMillis = index * 100L,
+                endMillis = (index + 1L) * 100L,
+                text = if (index == 199) "a".repeat(177) else "a".repeat(16),
+            )
+        }
+        assertEquals(3_361, sourceSegments.sumOf { it.text.length })
+        val source = input(*sourceSegments.toTypedArray())
+
+        val partitions = source.enrichmentRequestPartitions()
+
+        assertTrue(partitions.size > 1)
+        assertTrue(partitions.all { partition ->
+            EnrichmentPromptBuilder.build(partition, attempt = 1)
+                .userContent.length <= MAX_ENRICHMENT_USER_CONTENT_CHARACTERS
+        })
+        assertEquals(
+            source.segments.map(NightTranscriptSegment::id),
+            partitions.flatMap { it.segments }.map(NightTranscriptSegment::id),
+        )
+        assertTrue(partitions.all { partition ->
+            partition.segments.map(NightTranscriptSegment::sessionId).distinct() ==
+                listOf("session-a")
+        })
+    }
+
+    @Test
+    fun oversizedCaptureStartsAssociationCueOnFreshPartition() {
+        val sourceSegments = (0 until 200).map { index ->
+            segment(
+                sessionId = "session-a",
+                sessionOrder = 0,
+                segmentIndex = index,
+                startMillis = index * 100L,
+                endMillis = (index + 1L) * 100L,
+                text = when (index) {
+                    100 -> "CORRECTION"
+                    199 -> "a".repeat(183)
+                    else -> "a".repeat(16)
+                },
+            )
+        }
+        assertEquals(3_361, sourceSegments.sumOf { it.text.length })
+        val source = input(*sourceSegments.toTypedArray())
+
+        val partitions = source.enrichmentRequestPartitions()
+
+        assertTrue(partitions.size > 1)
+        assertTrue(partitions.any { partition ->
+            partition.segments.first().segmentIndex == 100 &&
+                partition.toEnrichmentSourceUnits().first().cue == EnrichmentCue.CORRECTION
+        })
+        assertEquals(
+            source.segments.map(NightTranscriptSegment::id),
+            partitions.flatMap { it.segments }.map(NightTranscriptSegment::id),
+        )
+    }
+
+    @Test
+    fun normalSizeRequestPartitionsMatchCapturePartitionsExactly() {
+        val source = input(
+            segment("session-a", 0, 0, 0L, 100L, "THE CAR WAS RED"),
+            segment("session-a", 0, 1, 100L, 200L, "THE ROAD WAS EMPTY"),
+            segment("session-b", 1, 0, 0L, 100L, "THE HOUSE WAS BLUE"),
+        )
+
+        val expected = source.capturePartitions()
+        val actual = source.enrichmentRequestPartitions()
+
+        assertEquals(expected.size, actual.size)
+        assertEquals(
+            expected.flatMap { it.segments }.map(NightTranscriptSegment::id),
+            actual.flatMap { it.segments }.map(NightTranscriptSegment::id),
+        )
+        assertEquals(
+            expected.map { EnrichmentPromptBuilder.build(it, attempt = 1).userContent },
+            actual.map { EnrichmentPromptBuilder.build(it, attempt = 1).userContent },
+        )
+    }
+
+    @Test
+    fun requestSizeProbeOnlyConvertsInputTooLargeIntoAMiss() {
+        assertFalse(
+            probeEnrichmentRequest { throw EnrichmentInputTooLargeException() },
+        )
+
+        val failure = runCatching {
+            probeEnrichmentRequest { error("prompt invariant failure") }
+        }.exceptionOrNull()
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals("prompt invariant failure", failure?.message)
+    }
+
+    @Test
+    fun artificialWithinCapturePartitionsMergeCueFreeMaterialAndRetainSourceCoverage() {
+        val segments = listOf(
+            segment("session-a", 0, 0, 0L, 100L, "I WALKED THROUGH RAIN"),
+            segment("session-a", 0, 1, 100L, 200L, "THE TREES BEGAN TO SING"),
+        )
+        val source = input(*segments.toTypedArray())
+        val partitions = segments.map { one -> input(one) }
+        val results = partitions.map { partition ->
+            parse(partition, dream(start = "s0", end = "s0"))
+        }
+
+        val merged = mergeCaptureEnrichments(source, partitions, results, expectedAttempt = 1)
+
+        assertEquals(1, merged.dreams.size)
+        assertEquals(
+            segments.map(NightTranscriptSegment::id),
+            merged.dreams.single().sourceSpans.flatMap(EnrichedSourceSpan::segmentIds),
+        )
+    }
+
+    @Test
+    fun artificialWithinCaptureNewDreamStaysSeparateAndReferenceReturnsToEarlierDream() {
+        val segments = listOf(
+            segment("session-a", 0, 0, 0L, 100L, "THE FIRST DREAM WAS ON A TRAIN"),
+            segment("session-a", 0, 1, 100L, 200L, "THE SECOND DREAM WAS IN A LIBRARY"),
+            segment("session-a", 0, 2, 200L, 300L, "BACK IN THE FIRST DREAM THE TRAIN ENTERED A TUNNEL"),
+        )
+        val source = input(*segments.toTypedArray())
+        val partitions = segments.map { one -> input(one) }
+        val results = partitions.map { partition ->
+            parse(partition, dream(start = "s0", end = "s0"))
+        }
+
+        val merged = mergeCaptureEnrichments(source, partitions, results, expectedAttempt = 1)
+
+        assertEquals(2, merged.dreams.size)
+        assertEquals(
+            listOf(0, 2),
+            merged.dreams.first().sourceSpans.flatMap { it.segmentIds }
+                .map(SourceSegmentId::segmentIndex),
+        )
+        assertEquals(
+            listOf(1),
+            merged.dreams.last().sourceSpans.flatMap { it.segmentIds }
+                .map(SourceSegmentId::segmentIndex),
+        )
+    }
+
+    @Test
+    fun activeDreamIdentitySurvivesReferenceThenCueFreeArtificialPartition() {
+        val segments = listOf(
+            segment("session-a", 0, 0, 0L, 100L, "THE FIRST DREAM WAS ON A TRAIN"),
+            segment("session-a", 0, 1, 100L, 200L, "THE SECOND DREAM WAS IN A LIBRARY"),
+            segment("session-a", 0, 2, 200L, 300L, "BACK IN THE FIRST DREAM THE TRAIN ENTERED A TUNNEL"),
+            segment("session-a", 0, 3, 300L, 400L, "THE TRAIN PASSED THROUGH A STATION"),
+        )
+        val source = input(*segments.toTypedArray())
+        val partitions = segments.map { one -> input(one) }
+        val results = partitions.map { partition ->
+            parse(partition, dream(start = "s0", end = "s0"))
+        }
+
+        val merged = mergeCaptureEnrichments(source, partitions, results, expectedAttempt = 1)
+
+        assertEquals(2, merged.dreams.size)
+        assertEquals(
+            listOf(0, 2, 3),
+            merged.dreams.first().sourceSpans.flatMap { it.segmentIds }
+                .map(SourceSegmentId::segmentIndex),
+        )
+        assertEquals(
+            listOf(1),
+            merged.dreams.last().sourceSpans.flatMap { it.segmentIds }
+                .map(SourceSegmentId::segmentIndex),
+        )
+    }
+
+    @Test
+    fun explicitOrdinalCorrectionAtArtificialBoundaryTargetsEarlierDream() {
+        val segments = listOf(
+            segment("session-a", 0, 0, 0L, 100L, "THE FIRST DREAM WAS ON A TRAIN"),
+            segment("session-a", 0, 1, 100L, 200L, "THE SECOND DREAM WAS IN A LIBRARY"),
+            segment("session-a", 0, 2, 200L, 300L, "CORRECTION THE FIRST DREAM HAD A BLUE TRAIN"),
+        )
+        val source = input(*segments.toTypedArray())
+        val partitions = segments.map { one -> input(one) }
+        val results = partitions.map { partition ->
+            parse(
+                partition,
+                dream(
+                    kind = EnrichedDreamKind.FRAGMENT,
+                    uncertain = true,
+                    start = "s0",
+                    end = "s0",
+                ),
+            )
+        }
+
+        val merged = mergeCaptureEnrichments(source, partitions, results, expectedAttempt = 1)
+
+        assertEquals(2, merged.dreams.size)
+        assertEquals(
+            listOf(0, 2),
+            merged.dreams.first().sourceSpans.flatMap { it.segmentIds }
+                .map(SourceSegmentId::segmentIndex),
+        )
+        assertEquals(DreamSourceRole.CORRECTION, merged.dreams.first().sourceSpans.last().role)
+        assertEquals(
+            listOf(1),
+            merged.dreams.last().sourceSpans.flatMap { it.segmentIds }
+                .map(SourceSegmentId::segmentIndex),
+        )
+    }
+
+    @Test
+    fun outOfRangeOrdinalAssociationIsRejectedInsteadOfMisattributed() {
+        val segments = listOf(
+            segment("session-a", 0, 0, 0L, 100L, "THE FIRST DREAM WAS ON A TRAIN"),
+            segment("session-a", 0, 1, 100L, 200L, "CORRECTION THE THIRD DREAM HAD A BLUE TRAIN"),
+        )
+        val source = input(*segments.toTypedArray())
+        val partitions = segments.map { one -> input(one) }
+        val results = partitions.map { partition ->
+            parse(
+                partition,
+                dream(
+                    kind = EnrichedDreamKind.FRAGMENT,
+                    uncertain = true,
+                    start = "s0",
+                    end = "s0",
+                ),
+            )
+        }
+
+        val failure = runCatching {
+            mergeCaptureEnrichments(source, partitions, results, expectedAttempt = 1)
+        }.exceptionOrNull()
+
+        assertTrue(failure is EnrichmentOutputException)
+        assertEquals(
+            EnrichmentOutputReason.UNKNOWN_RETURN_LABEL,
+            (failure as EnrichmentOutputException).reason,
+        )
+    }
+
+    @Test
+    fun uncertainCueAtArtificialBoundaryContinuesActiveDreamButIncompleteCueStaysSeparate() {
+        val segments = listOf(
+            segment("session-a", 0, 0, 0L, 100L, "THE CAR WAS RED"),
+            segment("session-a", 0, 1, 100L, 200L, "MAYBE THE CAR WAS NEAR A LAKE"),
+            segment("session-a", 0, 2, 200L, 300L, "I CANNOT REMEMBER THE REST"),
+        )
+        val source = input(*segments.toTypedArray())
+        val partitions = segments.map { one -> input(one) }
+        val results = partitions.map { partition ->
+            parse(partition, dream(start = "s0", end = "s0"))
+        }
+
+        val merged = mergeCaptureEnrichments(source, partitions, results, expectedAttempt = 1)
+
+        assertEquals(2, merged.dreams.size)
+        assertEquals(
+            listOf(0, 1),
+            merged.dreams.first().sourceSpans.flatMap { it.segmentIds }
+                .map(SourceSegmentId::segmentIndex),
+        )
+        assertEquals(
+            listOf(2),
+            merged.dreams.last().sourceSpans.flatMap { it.segmentIds }
+                .map(SourceSegmentId::segmentIndex),
+        )
+        assertEquals(EnrichedDreamKind.FRAGMENT, merged.dreams.last().kind)
+    }
+
+    @Test
+    fun artificialWithinCaptureContinuationPartitionsMergeAndRetainRoles() {
+        val segments = listOf(
+            segment("session-a", 0, 0, 0L, 100L, "THE CAR WAS RED"),
+            segment("session-a", 0, 1, 100L, 200L, "ANOTHER DETAIL IT WAS RAINING"),
+            segment("session-a", 0, 2, 200L, 300L, "CORRECTION THE CAR WAS BLUE"),
+        )
+        val source = input(*segments.toTypedArray())
+        val partitions = segments.map { one -> input(one) }
+        val results = partitions.map { partition ->
+            parse(
+                partition,
+                dream(
+                    kind = EnrichedDreamKind.FRAGMENT,
+                    uncertain = true,
+                    start = "s0",
+                    end = "s0",
+                ),
+            )
+        }
+
+        val merged = mergeCaptureEnrichments(source, partitions, results, expectedAttempt = 1)
+
+        assertEquals(1, merged.dreams.size)
+        assertEquals(
+            listOf(
+                DreamSourceRole.NARRATIVE,
+                DreamSourceRole.ADDITION,
+                DreamSourceRole.CORRECTION,
+            ),
+            merged.dreams.single().sourceSpans.map(EnrichedSourceSpan::role),
+        )
+    }
+
+    @Test
     fun explicitDreamBoundaryDoesNotPromoteIndependentlyIncompleteRecall() {
         val source = input(
             segment(

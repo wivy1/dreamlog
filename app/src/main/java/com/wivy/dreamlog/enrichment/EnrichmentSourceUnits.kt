@@ -24,6 +24,22 @@ internal fun classifyEnrichmentCue(text: String): EnrichmentCue {
     }
 }
 
+/** Returns a zero-based first-mention ordinal for an explicit dream return, when spoken. */
+internal fun enrichmentDreamReferenceOrdinal(text: String): Int? {
+    val normalized = supportedWords(text).joinToString(separator = " ")
+    val match = DREAM_REFERENCE_ORDINAL.find(normalized) ?: return null
+    val ordinal = match.groupValues[1]
+    DREAM_REFERENCE_ORDINAL_WORDS[ordinal]?.let { return it }
+    return ordinal
+        .removeSuffix("st")
+        .removeSuffix("nd")
+        .removeSuffix("rd")
+        .removeSuffix("th")
+        .toIntOrNull()
+        ?.minus(1)
+        ?.takeIf { it >= 0 }
+}
+
 internal data class EnrichmentSourceUnit(
     val ordinal: Int,
     val segments: List<NightTranscriptSegment>,
@@ -194,6 +210,24 @@ private val CUE_PHRASES: List<List<String>> = buildList {
 private val ORDINAL_DREAM_REFERENCE = Regex(
     "\\b(?:the )?(?:${ORDINAL_DREAM_WORDS.joinToString(separator = "|")}|" +
         "[0-9]+(?:st|nd|rd|th)) dream\\b",
+)
+
+private val DREAM_REFERENCE_ORDINAL = Regex(
+    "\\b(?:the )?(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|" +
+        "[0-9]+(?:st|nd|rd|th)) dream\\b",
+)
+
+private val DREAM_REFERENCE_ORDINAL_WORDS = mapOf(
+    "first" to 0,
+    "second" to 1,
+    "third" to 2,
+    "fourth" to 3,
+    "fifth" to 4,
+    "sixth" to 5,
+    "seventh" to 6,
+    "eighth" to 7,
+    "ninth" to 8,
+    "tenth" to 9,
 )
 
 private val NEW_DREAM_ORDINAL_REFERENCE = Regex(

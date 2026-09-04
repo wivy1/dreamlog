@@ -34,6 +34,7 @@ data class NightEntity(
     val enrichmentState: String,
     val enrichmentFailure: String?,
     val importWarning: String?,
+    val captureIssueReviewedFingerprint: String? = null,
 )
 
 @Entity(

@@ -12,6 +12,17 @@ private val SAFE_SOURCE_IDENTIFIER = Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 private val SHA_256 = Regex("[0-9a-f]{64}")
 private val ENRICHMENT_SOURCE_ALIAS = Regex("s(0|[1-9][0-9]*)")
 
+/**
+ * Probes the same prompt builder used for model requests without hiding prompt or source
+ * invariant failures as apparent size misses.
+ */
+internal fun probeEnrichmentRequest(build: () -> EnrichmentModelRequest): Boolean = try {
+    build()
+    true
+} catch (_: EnrichmentInputTooLargeException) {
+    false
+}
+
 internal fun enrichmentSourceAlias(ordinal: Int): String {
     require(ordinal >= 0) { "An enrichment source ordinal cannot be negative." }
     return "s$ordinal"
@@ -212,6 +223,80 @@ internal fun OrderedNightTranscript.capturePartitions(): List<OrderedNightTransc
     .values
     .map { captureSegments -> OrderedNightTranscript.create(nightId, captureSegments) }
 
+/**
+ * Returns fresh-conversation inputs that stay inside the application request bound while
+ * retaining every existing capture boundary. A source unit is the smallest safe partition: raw
+ * transcript segments are never split, and an indivisible unit that is itself too large is kept
+ * intact so the caller can report the precise terminal failure.
+ */
+internal fun OrderedNightTranscript.enrichmentRequestPartitions(): List<OrderedNightTranscript> =
+    capturePartitions().flatMap { capture ->
+        if (capture.fitsEnrichmentRequest()) return@flatMap listOf(capture)
+
+        val units = capture.toEnrichmentSourceUnits()
+        if (units.isEmpty()) {
+            listOf(capture)
+        } else {
+            val partitions = mutableListOf<OrderedNightTranscript>()
+            var current = mutableListOf<EnrichmentSourceUnit>()
+
+            fun flush() {
+                if (current.isEmpty()) return
+                partitions += OrderedNightTranscript.create(
+                    nightId = nightId,
+                    source = current.flatMap(EnrichmentSourceUnit::segments),
+                )
+                current = mutableListOf()
+            }
+
+            units.forEach { unit ->
+                if (
+                    current.isNotEmpty() &&
+                    unit.cue in ENRICHMENT_ASSOCIATION_CUES
+                ) {
+                    flush()
+                }
+                if (current.isEmpty()) {
+                    current += unit
+                    if (!current.fitsEnrichmentRequest(nightId)) flush()
+                    return@forEach
+                }
+
+                val candidate = current + unit
+                if (candidate.fitsEnrichmentRequest(nightId)) {
+                    current += unit
+                } else {
+                    flush()
+                    current += unit
+                    if (!current.fitsEnrichmentRequest(nightId)) flush()
+                }
+            }
+            flush()
+            partitions
+        }
+    }
+
+private fun List<EnrichmentSourceUnit>.fitsEnrichmentRequest(nightId: String): Boolean =
+    probeEnrichmentRequest {
+        EnrichmentPromptBuilder.build(
+            input = OrderedNightTranscript.create(
+                nightId = nightId,
+                source = flatMap(EnrichmentSourceUnit::segments),
+            ),
+            attempt = 1,
+        )
+    }
+
+private fun OrderedNightTranscript.fitsEnrichmentRequest(): Boolean = probeEnrichmentRequest {
+    EnrichmentPromptBuilder.build(this, attempt = 1)
+}
+
+private val ENRICHMENT_ASSOCIATION_CUES = setOf(
+    EnrichmentCue.DREAM_REFERENCE,
+    EnrichmentCue.ADDITION,
+    EnrichmentCue.CORRECTION,
+)
+
 enum class EnrichedDreamKind(val wireValue: String) {
     DREAM("dream"),
     FRAGMENT("fragment"),
@@ -319,6 +404,8 @@ internal fun mergeCaptureEnrichments(
     }
 
     val mergedDreams = mutableListOf<EnrichedDreamDraft>()
+    val activeDreamIndexByCapture = mutableMapOf<CaptureIdentity, Int>()
+    var previousCaptureIdentity: CaptureIdentity? = null
     captureInputs.zip(captureResults).forEach { (capture, result) ->
         if (
             result.schemaVersion != ENRICHMENT_SCHEMA_VERSION ||
@@ -339,9 +426,59 @@ internal fun mergeCaptureEnrichments(
         if (resultSourceCounts != expectedSourceCounts) {
             throw EnrichmentOutputException(EnrichmentOutputReason.INCOMPLETE_COVERAGE)
         }
-        result.dreams.forEach { dream ->
-            mergedDreams += dream.copy(order = mergedDreams.size)
+
+        val firstUnit = capture.toEnrichmentSourceUnits().firstOrNull()
+        val firstCue = firstUnit?.cue
+        val continuationCue = firstCue in setOf(
+            EnrichmentCue.NONE,
+            EnrichmentCue.DREAM_REFERENCE,
+            EnrichmentCue.ADDITION,
+            EnrichmentCue.CORRECTION,
+            EnrichmentCue.UNCERTAIN,
+        )
+        val firstSegment = capture.segments.firstOrNull()
+        val currentCaptureIdentity = firstSegment?.let { segment ->
+            CaptureIdentity(
+                sessionId = segment.sessionId,
+                sessionOrder = segment.sessionOrder,
+                transcriptAttempt = segment.transcriptAttempt,
+            )
         }
+        val sameCapture = previousCaptureIdentity == currentCaptureIdentity
+        val sessionId = firstSegment?.sessionId
+        val sameSessionDreamIndices = sessionId?.let { currentSessionId ->
+            mergedDreams.indices.filter { index ->
+                mergedDreams[index].sourceSpans.all { span -> span.sessionId == currentSessionId }
+            }
+        }.orEmpty()
+        val continuationTarget = if (sameCapture && continuationCue && result.dreams.isNotEmpty()) {
+            val explicitReferenceOrdinal = firstUnit
+                ?.text
+                ?.let(::enrichmentDreamReferenceOrdinal)
+            if (explicitReferenceOrdinal != null) {
+                sameSessionDreamIndices.getOrNull(explicitReferenceOrdinal)
+                    ?: throw EnrichmentOutputException(EnrichmentOutputReason.UNKNOWN_RETURN_LABEL)
+            } else {
+                currentCaptureIdentity?.let(activeDreamIndexByCapture::get)
+            }
+        } else {
+            null
+        }
+        var lastMappedDreamIndex: Int? = null
+        result.dreams.forEachIndexed { index, dream ->
+            if (index == 0 && continuationTarget != null) {
+                mergedDreams[continuationTarget] =
+                    mergedDreams[continuationTarget].appendContinuation(dream)
+                lastMappedDreamIndex = continuationTarget
+            } else {
+                mergedDreams += dream.copy(order = mergedDreams.size)
+                lastMappedDreamIndex = mergedDreams.lastIndex
+            }
+        }
+        currentCaptureIdentity?.let { identity ->
+            lastMappedDreamIndex?.let { index -> activeDreamIndexByCapture[identity] = index }
+        }
+        previousCaptureIdentity = currentCaptureIdentity
     }
 
     return ValidatedEnrichment(
@@ -351,6 +488,48 @@ internal fun mergeCaptureEnrichments(
         dreams = mergedDreams,
     )
 }
+
+private data class CaptureIdentity(
+    val sessionId: String,
+    val sessionOrder: Int,
+    val transcriptAttempt: Int,
+)
+
+private fun EnrichedDreamDraft.appendContinuation(
+    continuation: EnrichedDreamDraft,
+): EnrichedDreamDraft = copy(
+    kind = if (
+        kind == EnrichedDreamKind.DREAM || continuation.kind == EnrichedDreamKind.DREAM
+    ) {
+        EnrichedDreamKind.DREAM
+    } else {
+        EnrichedDreamKind.FRAGMENT
+    },
+    generatedTitle = generatedTitle ?: continuation.generatedTitle,
+    generatedText = "$generatedText ${continuation.generatedText}".trim(),
+    uncertain = uncertain || continuation.uncertain,
+    sourceSpans = (sourceSpans + continuation.sourceSpans).coalesceAdjacentSourceSpans(),
+)
+
+private fun List<EnrichedSourceSpan>.coalesceAdjacentSourceSpans(): List<EnrichedSourceSpan> =
+    fold(mutableListOf()) { result, span ->
+        val previous = result.lastOrNull()
+        if (
+            previous != null &&
+            previous.role == span.role &&
+            previous.sessionId == span.sessionId &&
+            previous.endSegmentIndexInclusive + 1 == span.startSegmentIndex
+        ) {
+            result[result.lastIndex] = previous.copy(
+                endSegmentIndexInclusive = span.endSegmentIndexInclusive,
+                sourceEndMillis = span.sourceEndMillis,
+                segmentIds = previous.segmentIds + span.segmentIds,
+            )
+        } else {
+            result += span
+        }
+        result
+    }
 
 internal enum class EnrichmentOutputReason(val safeDetail: String) {
     OUTPUT_TOO_LARGE("The local model returned more output than the schema permits."),

@@ -65,6 +65,16 @@ data class SessionAudioMetadata(
         get() = incompleteReason == null
 }
 
+/** Exact writer-owned files found by a read-only scan of one night directory. */
+data class SessionAudioArtifactInventory(
+    val directoryPresent: Boolean,
+    val finalFileNames: Set<String>,
+    val validFinalFileNames: Set<String>,
+    val partialFileNames: Set<String>,
+    val metadataFileNames: Set<String>,
+    val metadataPartialFileNames: Set<String>,
+)
+
 /**
  * Writes only wake-triggered narrative audio. Constructing this class performs no disk I/O;
  * [startSession] is the first operation that creates a file.
@@ -159,6 +169,43 @@ class SessionAudioWriter(
                     .thenBy { it.audioFileName },
             )
             .toList()
+    }
+
+    /**
+     * Inventories exact writer-owned artifacts without creating, repairing, moving, or deleting
+     * anything. Foreign names and paths outside the selected canonical directory are ignored.
+     */
+    fun inspectArtifacts(): SessionAudioArtifactInventory {
+        val canonicalDirectory = runCatching { audioDirectory.canonicalFile }.getOrNull()
+        if (canonicalDirectory?.isDirectory != true) return EMPTY_ARTIFACT_INVENTORY
+
+        val names = canonicalDirectory.listFiles()
+            .orEmpty()
+            .mapNotNull { file ->
+                val canonicalFile = runCatching { file.canonicalFile }.getOrNull()
+                    ?: return@mapNotNull null
+                file.name.takeIf {
+                    canonicalFile.isFile && canonicalFile.parentFile == canonicalDirectory
+                }
+            }
+        return SessionAudioArtifactInventory(
+            directoryPresent = true,
+            finalFileNames = names.mapNotNull { name ->
+                sessionIdFromFinalName(name)?.let { name }
+            }.toSortedSet(),
+            validFinalFileNames = discoverFinalizedAudio()
+                .map(SessionAudioMetadata::audioFileName)
+                .toSortedSet(),
+            partialFileNames = names.mapNotNull { name ->
+                sessionIdFromPartialName(name)?.let { name }
+            }.toSortedSet(),
+            metadataFileNames = names.mapNotNull { name ->
+                sessionIdFromMetadataName(name)?.let { name }
+            }.toSortedSet(),
+            metadataPartialFileNames = names.mapNotNull { name ->
+                sessionIdFromMetadataPartialName(name)?.let { name }
+            }.toSortedSet(),
+        )
     }
 
     /**
@@ -576,6 +623,14 @@ class SessionAudioWriter(
         private const val METADATA_SUFFIX = ".properties"
         private const val METADATA_VERSION = "1"
         private val OPAQUE_ID_PATTERN = Regex("[0-9a-f]{32}")
+        private val EMPTY_ARTIFACT_INVENTORY = SessionAudioArtifactInventory(
+            directoryPresent = false,
+            finalFileNames = emptySet(),
+            validFinalFileNames = emptySet(),
+            partialFileNames = emptySet(),
+            metadataFileNames = emptySet(),
+            metadataPartialFileNames = emptySet(),
+        )
 
         private fun sessionIdFromFinalName(name: String): String? =
             name.removePrefix(FILE_PREFIX)
@@ -589,6 +644,21 @@ class SessionAudioWriter(
                 .removeSuffix("$WAV_SUFFIX$PART_SUFFIX")
                 .takeIf {
                     name == "$FILE_PREFIX$it$WAV_SUFFIX$PART_SUFFIX" &&
+                        OPAQUE_ID_PATTERN.matches(it)
+                }
+
+        private fun sessionIdFromMetadataName(name: String): String? =
+            name.removePrefix(FILE_PREFIX)
+                .removeSuffix(METADATA_SUFFIX)
+                .takeIf {
+                    name == "$FILE_PREFIX$it$METADATA_SUFFIX" && OPAQUE_ID_PATTERN.matches(it)
+                }
+
+        private fun sessionIdFromMetadataPartialName(name: String): String? =
+            name.removePrefix(FILE_PREFIX)
+                .removeSuffix("$METADATA_SUFFIX$PART_SUFFIX")
+                .takeIf {
+                    name == "$FILE_PREFIX$it$METADATA_SUFFIX$PART_SUFFIX" &&
                         OPAQUE_ID_PATTERN.matches(it)
                 }
 

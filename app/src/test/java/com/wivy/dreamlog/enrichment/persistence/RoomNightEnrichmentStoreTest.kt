@@ -8,6 +8,7 @@ import com.wivy.dreamlog.enrichment.EnrichedDreamKind
 import com.wivy.dreamlog.enrichment.EnrichedSourceSpan
 import com.wivy.dreamlog.enrichment.EnrichmentEngineMetadata
 import com.wivy.dreamlog.enrichment.EnrichmentFailureCode
+import com.wivy.dreamlog.enrichment.EnrichmentInterruptionCause
 import com.wivy.dreamlog.enrichment.EnrichmentOutputReason
 import com.wivy.dreamlog.enrichment.EnrichmentRunDescriptor
 import com.wivy.dreamlog.enrichment.INTERRUPTED_ENRICHMENT_FAILURE_DETAIL
@@ -15,6 +16,7 @@ import com.wivy.dreamlog.enrichment.OrderedNightTranscript
 import com.wivy.dreamlog.enrichment.PersistedEnrichmentFailure
 import com.wivy.dreamlog.enrichment.SourceSegmentId
 import com.wivy.dreamlog.enrichment.ValidatedEnrichment
+import com.wivy.dreamlog.enrichment.recoveredEnrichmentFailureDetail
 import com.wivy.dreamlog.history.AudioEvidenceState
 import com.wivy.dreamlog.history.CaptureSessionEntity
 import com.wivy.dreamlog.history.DreamDraft
@@ -50,6 +52,24 @@ class RoomNightEnrichmentStoreTest {
                 "The raw transcript remains available. [code=input_too_large; retryable=false]",
             ),
         )
+        assertTrue(
+            persistedEnrichmentFailureIsRetryable(
+                "One capture exceeds this local model's context budget. " +
+                    "[code=capture_input_too_large; retryable=false]",
+            ),
+        )
+        listOf("input_too_large", "capture_input_too_large").forEach { code ->
+            val display = persistedEnrichmentFailureDisplayDetail(
+                "One capture exceeds this local model's context budget. " +
+                    "The raw transcript remains available to retry after an app update. " +
+                    "[code=$code; retryable=false]",
+            ).orEmpty()
+            assertTrue(display.contains("previous enrichment path could not fit this night's transcript"))
+            assertFalse(display.contains("this capture"))
+            assertTrue(display.contains("context budget"))
+            assertFalse(display.contains("after an app update"))
+            assertFalse(display.contains("[code="))
+        }
         assertFalse(
             persistedEnrichmentFailureIsRetryable(
                 "The raw transcript is invalid. [code=invalid_source; retryable=false]",
@@ -65,7 +85,38 @@ class RoomNightEnrichmentStoreTest {
         )
         assertFalse(persistedEnrichmentFailureIsRetryable("retryable=true"))
         assertFalse(persistedEnrichmentFailureIsRetryable(null))
+        assertEquals(
+            "A plain legacy detail",
+            persistedEnrichmentFailureDisplayDetail("  A plain legacy detail  "),
+        )
+        assertNull(persistedEnrichmentFailureDisplayDetail("   "))
         assertNull(persistedEnrichmentFailureDisplayDetail(null))
+    }
+
+    @Test
+    fun foregroundInterruptionMarkersRemainContentFreeRetryableAndCauseSpecific() {
+        listOf(
+            EnrichmentInterruptionCause.APP_HIDDEN to EnrichmentFailureCode.APP_HIDDEN,
+            EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED to
+                EnrichmentFailureCode.SCREEN_OFF_OR_LOCKED,
+            EnrichmentInterruptionCause.USER_CANCELLED to EnrichmentFailureCode.USER_CANCELLED,
+        ).forEach { (cause, code) ->
+            val detail = recoveredEnrichmentFailureDetail(cause)
+            assertEquals(code.persistedValue, persistedEnrichmentFailureCode(detail))
+            assertEquals(code.safeDetail, persistedEnrichmentFailureDisplayDetail(detail))
+            assertTrue(persistedEnrichmentFailureIsRetryable(detail))
+        }
+
+        val unknown = recoveredEnrichmentFailureDetail(null)
+        assertEquals(
+            EnrichmentFailureCode.UNKNOWN_PROCESS_LOSS.persistedValue,
+            persistedEnrichmentFailureCode(unknown),
+        )
+        assertEquals(
+            EnrichmentFailureCode.UNKNOWN_PROCESS_LOSS.safeDetail,
+            persistedEnrichmentFailureDisplayDetail(unknown),
+        )
+        assertTrue(persistedEnrichmentFailureIsRetryable(unknown))
     }
 
     @Test

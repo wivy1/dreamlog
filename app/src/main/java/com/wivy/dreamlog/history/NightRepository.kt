@@ -21,6 +21,19 @@ internal data class RawAudioRetentionResult(
     val failureCount: Int = 0,
 )
 
+data class NightAudioArtifactInspection(
+    val directoryPresent: Boolean,
+    val recordedSessionCount: Int,
+    val recordedFinalPresentCount: Int,
+    val recordedFinalValidCount: Int,
+    val extraFinalizedCandidateCount: Int,
+    val extraFinalizedOutsideNightCount: Int,
+    val extraUnverifiedFinalCount: Int,
+    val partialFileCount: Int,
+    val metadataOnlyCount: Int,
+    val metadataPartialCount: Int,
+)
+
 class NightRepository(
     private val dao: NightDao,
     private val journalStore: CaptureJournalStore,
@@ -162,6 +175,94 @@ class NightRepository(
     @Synchronized
     fun readNight(nightId: String): NightRecord? =
         dao.readNight(nightId)?.let(::toRecord)
+
+    /** Read-only, content-free inventory of one finalized night's exact private audio directory. */
+    @Synchronized
+    internal fun inspectEndedNightAudio(nightId: String): NightAudioArtifactInspection {
+        requireSafeIdentifier(nightId)
+        val useLease = RawAudioUseRegistry.processWide.tryAcquireUse(nightId)
+            ?: error("Raw audio is being changed. Wait for the current archive action and retry.")
+        useLease.use {
+            val existing = dao.readNight(nightId)
+                ?: error("The selected night is no longer present.")
+            requireFinalizedArchiveMutation(existing.night)
+            val expectedFinalFileNames = existing.sessions
+                .map(CaptureSessionEntity::audioFileName)
+                .toSet()
+            val writer = SessionAudioWriter(canonicalNightAudioDirectory(nightId))
+            val inventory = writer.inspectArtifacts()
+            val validMetadata = writer.discoverFinalizedAudio()
+            val validFinalFileNames = validMetadata
+                .map(SessionAudioMetadata::audioFileName)
+                .toSet()
+            val extraValidMetadata = validMetadata.filter { metadata ->
+                metadata.audioFileName !in expectedFinalFileNames
+            }
+            val extraFinalizedCandidateCount = extraValidMetadata.count { metadata ->
+                metadata.isWithin(existing.night)
+            }
+            val extraFinalizedOutsideNightCount =
+                extraValidMetadata.size - extraFinalizedCandidateCount
+            val actualArtifactBases = buildSet {
+                inventory.finalFileNames.forEach { add(it.removeSuffix(".wav")) }
+                inventory.partialFileNames.forEach { add(it.removeSuffix(".wav.part")) }
+            }
+            val metadataOnlyCount = inventory.metadataFileNames.count { metadataName ->
+                metadataName.removeSuffix(".properties") !in actualArtifactBases
+            }
+            return NightAudioArtifactInspection(
+                directoryPresent = inventory.directoryPresent,
+                recordedSessionCount = existing.sessions.size,
+                recordedFinalPresentCount =
+                    expectedFinalFileNames.count(inventory.finalFileNames::contains),
+                recordedFinalValidCount =
+                    expectedFinalFileNames.count(validFinalFileNames::contains),
+                extraFinalizedCandidateCount = extraFinalizedCandidateCount,
+                extraFinalizedOutsideNightCount = extraFinalizedOutsideNightCount,
+                extraUnverifiedFinalCount = inventory.finalFileNames.count { fileName ->
+                    fileName !in expectedFinalFileNames && fileName !in validFinalFileNames
+                },
+                partialFileCount = inventory.partialFileNames.size,
+                metadataOnlyCount = metadataOnlyCount,
+                metadataPartialCount = inventory.metadataPartialFileNames.size,
+            )
+        }
+    }
+
+    /**
+     * Acknowledges only the currently persisted capture issue. The fingerprint is recomputed from
+     * the capture graph immediately before the acknowledgement, so later evidence changes cannot
+     * remain hidden behind this acknowledgement.
+     */
+    @Synchronized
+    fun markCaptureIssueReviewed(nightId: String): Boolean {
+        requireSafeIdentifier(nightId)
+        val current = dao.readNight(nightId) ?: return false
+        val record = toRecord(current)
+        val fingerprint = CaptureIssueFingerprint.current(record) ?: return false
+        if (current.night.captureIssueReviewedFingerprint == fingerprint) return false
+        check(
+            dao.setCaptureIssueReviewedFingerprint(
+                nightId = nightId,
+                fingerprint = fingerprint,
+            ),
+        ) { "The capture issue acknowledgement could not be saved." }
+        return true
+    }
+
+    @Synchronized
+    fun showCaptureIssueAgain(nightId: String): Boolean {
+        requireSafeIdentifier(nightId)
+        val current = dao.readNight(nightId) ?: return false
+        if (current.night.captureIssueReviewedFingerprint == null) return false
+        check(
+            dao.setCaptureIssueReviewedFingerprint(
+                nightId = nightId,
+                fingerprint = null,
+            ),
+        ) { "The capture issue could not be shown again." }
+        return true
+    }
 
     @Synchronized
     fun editDream(
@@ -533,6 +634,7 @@ class NightRepository(
             enrichmentFailure = recoveredGraphFailure
                 ?: existing?.night?.enrichmentFailure,
             importWarning = warnings.joinToString(" ").ifBlank { null },
+            captureIssueReviewedFingerprint = existing?.night?.captureIssueReviewedFingerprint,
         )
         dao.upsertCaptureGraph(night, sessions, events)
         return ImportResult(
@@ -662,6 +764,7 @@ class NightRepository(
                 ?: ProcessingState.WAITING_FOR_TRANSCRIPTION,
             enrichmentFailure = existing?.night?.enrichmentFailure,
             importWarning = warnings.joinToString(" ").ifBlank { null },
+            captureIssueReviewedFingerprint = existing?.night?.captureIssueReviewedFingerprint,
         )
         dao.upsertCaptureGraph(night, sessions, events)
         return ImportResult(
@@ -776,6 +879,14 @@ class NightRepository(
     private fun SessionAudioMetadata.isWithin(end: NightEndRecord): Boolean =
         startedAtEpochMillis in end.startedAtEpochMillis..end.endedAtEpochMillis &&
             finalizedAtEpochMillis in startedAtEpochMillis..end.endedAtEpochMillis
+
+    private fun SessionAudioMetadata.isWithin(night: NightEntity): Boolean {
+        val endedAt = checkNotNull(night.endedAtEpochMillis) {
+            "The selected night has not finished finalizing."
+        }
+        return startedAtEpochMillis in night.startedAtEpochMillis..endedAt &&
+            finalizedAtEpochMillis in startedAtEpochMillis..endedAt
+    }
 
     private fun NightWithDetails.hasProtectedDreamChanges(): Boolean =
         dreams.any { sourceDream ->

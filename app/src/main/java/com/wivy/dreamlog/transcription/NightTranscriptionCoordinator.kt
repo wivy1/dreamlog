@@ -471,6 +471,9 @@ class NightTranscriptionCoordinator internal constructor(
             // A cue is non-speech, so it contributes acoustic context but no transcript words.
             val contextualPhrase = triggeringWakePhrase.takeIf { cueStart != null }
             val contentStart = cueStart ?: cueEnd
+            val triggerReport = session.preRollSampleCount?.takeIf { report ->
+                report > 0L && report <= contentStart
+            }
             return TranscriptionInput(
                 acousticRange = Pcm16WavSource.RecognitionRange(
                     startSample = if (contextualPhrase == null) contentStart else 0L,
@@ -478,6 +481,7 @@ class NightTranscriptionCoordinator internal constructor(
                 ),
                 contentStartSample = contentStart,
                 triggeringWakePhrase = contextualPhrase,
+                triggerReportSample = triggerReport.takeIf { contextualPhrase != null },
                 openingRecoveryFloorSample = cueEnd,
             )
         }
@@ -501,6 +505,7 @@ class NightTranscriptionCoordinator internal constructor(
             ),
             contentStartSample = contentStart,
             triggeringWakePhrase = contextualPhrase,
+            triggerReportSample = postDetectionBoundary.takeIf { contextualPhrase != null },
         )
     }
 

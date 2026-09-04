@@ -15,10 +15,12 @@ import com.wivy.dreamlog.enrichment.model.InstalledEnrichmentModel
 import com.wivy.dreamlog.enrichment.persistence.RoomNightEnrichmentStore
 import com.wivy.dreamlog.history.DreamLogDatabase
 import com.wivy.dreamlog.history.EnrichmentDao
+import com.wivy.dreamlog.history.ProcessingState
 import com.wivy.dreamlog.transcription.CaptureTranscriptionOperationGate
 import com.wivy.dreamlog.transcription.TranscriptionRuntimeStore
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -61,6 +63,7 @@ data class EnrichmentRuntimeSnapshot(
     val batchUnstartedNightCount: Int = 0,
     val runtimeMessage: String? = null,
     val runtimeError: String? = null,
+    val interruptionCause: EnrichmentInterruptionCause? = null,
     val historyRevision: Long = 0L,
 ) {
     val modelSizeMiB: Double
@@ -110,6 +113,7 @@ object EnrichmentRuntimeStore {
     private var activeOperation: RuntimeOperation? = null
     private var modelOperationOwnsGate = false
     private var installCancellation: AtomicBoolean? = null
+    private var activeInterruption: AtomicReference<EnrichmentInterruptionCause?>? = null
 
     fun initialize(context: Context): Boolean {
         val appContext = context.applicationContext
@@ -214,6 +218,26 @@ object EnrichmentRuntimeStore {
 
     fun processNight(nightId: String): Boolean = processNights(listOf(nightId))
 
+    fun requestForegroundInterruption(cause: EnrichmentInterruptionCause): Boolean =
+        synchronized(lock) {
+            if (
+                activeOperation != RuntimeOperation.ENRICH ||
+                mutableSnapshots.value.runtimePhase != EnrichmentRuntimePhase.RUNNING
+            ) {
+                return@synchronized false
+            }
+            val signal = activeInterruption ?: return@synchronized false
+            if (!signal.compareAndSet(null, cause)) return@synchronized false
+            dependencies?.interruptionJournal?.record(cause)
+            publishLocked(
+                mutableSnapshots.value.copy(
+                    interruptionCause = cause,
+                    runtimeMessage = interruptionRequestedMessage(cause),
+                ),
+            )
+            true
+        }
+
     /**
      * Freezes one owner-selected batch for this app process. Leaving or losing the process makes
      * any started attempt retryable and leaves unstarted nights waiting.
@@ -230,6 +254,30 @@ object EnrichmentRuntimeStore {
         val request = synchronized(lock) {
             val runtime = dependencies ?: return false
             if (activeOperation != null) return false
+            if (runtime.interruptionJournal.isActive()) {
+                publishLocked(
+                    mutableSnapshots.value.copy(
+                        runtimePhase = EnrichmentRuntimePhase.ERROR,
+                        runtimeMessage = null,
+                        runtimeError =
+                            "Enrichment recovery needs DreamLog to restart before another batch.",
+                    ),
+                )
+                return false
+            }
+            if (!runtime.interruptionJournal.begin(requestedNightIds)) {
+                publishLocked(
+                    mutableSnapshots.value.copy(
+                        runtimePhase = EnrichmentRuntimePhase.ERROR,
+                        runtimeMessage = null,
+                        runtimeError =
+                            "Enrichment could not create its private recovery marker. Try again.",
+                    ),
+                )
+                return false
+            }
+            val interruption = AtomicReference<EnrichmentInterruptionCause?>(null)
+            activeInterruption = interruption
             activeOperation = RuntimeOperation.ENRICH
             publishLocked(
                 mutableSnapshots.value.copy(
@@ -247,13 +295,19 @@ object EnrichmentRuntimeStore {
                     batchUnstartedNightCount = requestedNightIds.size,
                     runtimeMessage = APP_OPEN_MESSAGE,
                     runtimeError = null,
+                    interruptionCause = null,
                 ),
             )
-            EnrichmentRequest(runtime, installedModel)
+            EnrichmentRequest(runtime, installedModel, interruption)
         }
-        return launchFiniteThread("DreamLog pending-night enrichment batch") {
+        val launched = launchFiniteThread("DreamLog pending-night enrichment batch") {
             processBatchOnThread(request, requestedNightIds)
         }
+        if (!launched) {
+            request.runtime.interruptionJournal.clear()
+            synchronized(lock) { activeInterruption = null }
+        }
+        return launched
     }
 
     private fun initializeOnThread(appContext: Context) {
@@ -261,17 +315,31 @@ object EnrichmentRuntimeStore {
         var claimedGate = false
         try {
             val database = DreamLogDatabase.get(appContext)
+            val nightDao = database.nightDao()
             val runtime = RuntimeDependencies(
                 modelManager = EnrichmentModelManager(appContext.filesDir),
                 enrichmentDao = database.enrichmentDao(),
-                store = RoomNightEnrichmentStore(database.nightDao(), database.enrichmentDao()),
+                store = RoomNightEnrichmentStore(nightDao, database.enrichmentDao()),
                 cacheDirectory = File(appContext.cacheDir, "enrichment-litert-lm"),
+                interruptionJournal = EnrichmentInterruptionJournal(appContext),
             )
+            val interruptedNightIds = runtime.interruptionJournal.requestedNightIds()
+            val recoveredCause = runtime.interruptionJournal.recoveredCause()
             recovered = runtime.enrichmentDao.markStaleRunningRunsFailed(
                 startedBeforeEpochMillis = Long.MAX_VALUE,
                 recoveredAtEpochMillis = System.currentTimeMillis().coerceAtLeast(0L),
-                failureDetail = INTERRUPTED_ENRICHMENT_FAILURE_DETAIL,
+                failureDetail = recoveredEnrichmentFailureDetail(recoveredCause),
             )
+            val interruptedNightStates = interruptedNightIds.map { nightId ->
+                nightDao.readNight(nightId)?.night?.enrichmentState
+            }
+            val reportRecoveredInterruption = shouldReportRecoveredEnrichmentInterruption(
+                recoveredRunCount = recovered,
+                requestedNightStates = interruptedNightStates,
+            )
+            check(runtime.interruptionJournal.clear()) {
+                "The private enrichment recovery marker could not be cleared."
+            }
             val canVerify = !CaptureRuntimeStore.snapshots.value.active &&
                 TranscriptionRuntimeStore.snapshots.value.initialized &&
                 !TranscriptionRuntimeStore.snapshots.value.busy
@@ -299,6 +367,16 @@ object EnrichmentRuntimeStore {
                         status,
                         initialized = true,
                         historyRevisionIncrement = if (recovered > 0) 1 else 0,
+                    )
+                }
+                if (reportRecoveredInterruption) {
+                    publishLocked(
+                        mutableSnapshots.value.copy(
+                            runtimePhase = EnrichmentRuntimePhase.ERROR,
+                            runtimeMessage = null,
+                            runtimeError = recoveredEnrichmentMessage(recoveredCause),
+                            interruptionCause = recoveredCause,
+                        ),
                     )
                 }
             }
@@ -438,24 +516,48 @@ object EnrichmentRuntimeStore {
         try {
             processBatchSafely(request, nightIds)
         } catch (_: Throwable) {
+            val recovery = runCatching {
+                reconcileRunningEnrichmentAttempts(
+                    request = request,
+                    failureDetail = unexpectedBatchFailureDetail(request),
+                )
+            }
+            val recoveredRunCount = recovery.getOrDefault(0)
             synchronized(lock) {
-                if (activeOperation != RuntimeOperation.ENRICH) return@synchronized
-                activeOperation = null
+                if (activeInterruption !== request.interruption) return@synchronized
+                val recoveryCompleted = recovery.isSuccess &&
+                    request.runtime.interruptionJournal.clear()
                 val previous = mutableSnapshots.value
                 val processedNightCount = previous.batchProcessedNightCount
                 publishLocked(
                     previous.copy(
                         runtimePhase = EnrichmentRuntimePhase.ERROR,
                         runtimeMessage = null,
-                        runtimeError = "The enrichment batch stopped unexpectedly after " +
-                            "$processedNightCount of ${nightIds.size} nights. Existing raw " +
-                            "transcripts were not changed.",
+                        runtimeError = if (recoveryCompleted) {
+                            "The enrichment batch stopped unexpectedly after " +
+                                "$processedNightCount of ${nightIds.size} nights. Unfinished " +
+                                "nights are ready to retry; existing raw transcripts were not " +
+                                "changed."
+                        } else {
+                            "The enrichment batch stopped unexpectedly, and its private recovery " +
+                                "step could not finish. Restart DreamLog before retrying; existing " +
+                                "raw transcripts were not changed."
+                        },
                         batchUnstartedNightCount =
                             (nightIds.size - processedNightCount).coerceAtLeast(0),
                         historyRevision = previous.historyRevision +
-                            if (processedNightCount > 0) 1L else 0L,
+                            if (processedNightCount > 0 || recoveredRunCount > 0) 1L else 0L,
+                        interruptionCause = request.interruption.get(),
                     ),
                 )
+                activeOperation = null
+                activeInterruption = null
+            }
+        } finally {
+            synchronized(lock) {
+                if (activeInterruption === request.interruption) {
+                    activeInterruption = null
+                }
             }
         }
     }
@@ -487,6 +589,7 @@ object EnrichmentRuntimeStore {
                     null
                 }
             },
+            interruptionCause = request.interruption::get,
         )
         val outcome = coordinator.processBatch(nightIds) { progress ->
             synchronized(lock) {
@@ -509,13 +612,26 @@ object EnrichmentRuntimeStore {
                 )
             }
         }
+        val recoveredRunCount = reconcileRunningEnrichmentAttempts(
+            request = request,
+            failureDetail = outcomeReconciliationFailureDetail(request, outcome),
+        )
         synchronized(lock) {
-            if (activeOperation != RuntimeOperation.ENRICH) return
-            activeOperation = null
+            check(activeOperation == RuntimeOperation.ENRICH) {
+                "The active enrichment batch changed before terminal publication."
+            }
+            check(activeInterruption === request.interruption) {
+                "The active enrichment signal changed before terminal publication."
+            }
+            val journalCleared = request.runtime.interruptionJournal.clear()
             val totalDreamCount = outcome.outcomes
                 .filterIsInstance<EnrichmentRunOutcome.Completed>()
                 .sumOf(EnrichmentRunOutcome.Completed::dreamCount)
-            val successful = outcome.failedNightCount == 0 && outcome.unstartedNightCount == 0
+            val workSuccessful = outcome.failedNightCount == 0 &&
+                outcome.unstartedNightCount == 0 &&
+                recoveredRunCount == 0
+            val successful = workSuccessful && journalCleared
+            val completedInterruptionCause = if (successful) null else request.interruption.get()
             publishLocked(
                 mutableSnapshots.value.copy(
                     runtimePhase = if (successful) {
@@ -536,12 +652,51 @@ object EnrichmentRuntimeStore {
                     } else {
                         null
                     },
-                    runtimeError = if (successful) null else batchFailureMessage(outcome),
+                    runtimeError = if (successful) {
+                        null
+                    } else if (!journalCleared) {
+                        "Enrichment finished, but its private recovery marker could not be " +
+                            "cleared. Restart DreamLog before retrying; saved work and raw " +
+                            "transcripts were not changed."
+                    } else {
+                        batchFailureMessage(outcome, completedInterruptionCause)
+                    },
+                    interruptionCause = completedInterruptionCause,
                     historyRevision = mutableSnapshots.value.historyRevision + 1L,
                 ),
             )
+            activeOperation = null
+            activeInterruption = null
         }
     }
+
+    private fun reconcileRunningEnrichmentAttempts(
+        request: EnrichmentRequest,
+        failureDetail: String,
+    ): Int = request.runtime.enrichmentDao.markStaleRunningRunsFailed(
+        startedBeforeEpochMillis = Long.MAX_VALUE,
+        recoveredAtEpochMillis = System.currentTimeMillis().coerceAtLeast(0L),
+        failureDetail = failureDetail,
+    )
+
+    private fun outcomeReconciliationFailureDetail(
+        request: EnrichmentRequest,
+        outcome: EnrichmentBatchOutcome,
+    ): String = request.interruption.get()
+        ?.failureCode()
+        ?.persistedFailureDetail()
+        ?: outcome.outcomes
+            .filterIsInstance<EnrichmentRunOutcome.Failure>()
+            .lastOrNull()
+            ?.code
+            ?.persistedFailureDetail()
+        ?: EnrichmentFailureCode.UNEXPECTED_FAILURE.persistedFailureDetail()
+
+    private fun unexpectedBatchFailureDetail(request: EnrichmentRequest): String =
+        request.interruption.get()
+            ?.failureCode()
+            ?.persistedFailureDetail()
+            ?: EnrichmentFailureCode.UNEXPECTED_FAILURE.persistedFailureDetail()
 
     private fun metadataOnlyFactory(): EnrichmentEngineFactory = object : EnrichmentEngineFactory {
         override val metadata = EnrichmentEngineMetadata(
@@ -703,6 +858,18 @@ object EnrichmentRuntimeStore {
         EnrichmentOperationPhase.FAILED -> "Local enrichment needs attention."
     }
 
+    private fun interruptionRequestedMessage(cause: EnrichmentInterruptionCause): String =
+        when (cause) {
+            EnrichmentInterruptionCause.APP_HIDDEN ->
+                "Stopping local enrichment because DreamLog was hidden."
+
+            EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED ->
+                "Stopping local enrichment because the screen turned off or the phone locked."
+
+            EnrichmentInterruptionCause.USER_CANCELLED ->
+                "Stopping local enrichment at your request."
+        }
+
     private fun batchOperationMessage(progress: EnrichmentBatchProgress): String =
         "Night ${progress.currentNightNumber} of ${progress.totalNightCount}. " +
             operationMessage(progress.operation.phase)
@@ -717,7 +884,10 @@ object EnrichmentRuntimeStore {
             "$totalDreamCount $dreamLabel saved."
     }
 
-    private fun batchFailureMessage(outcome: EnrichmentBatchOutcome): String {
+    private fun batchFailureMessage(
+        outcome: EnrichmentBatchOutcome,
+        interruptionCause: EnrichmentInterruptionCause?,
+    ): String {
         val lead = if (outcome.unstartedNightCount > 0) "Batch stopped" else "Batch finished"
         val counts = buildString {
             append("${outcome.completedNightCount} completed, ${outcome.failedNightCount} failed")
@@ -726,11 +896,12 @@ object EnrichmentRuntimeStore {
             }
             append('.')
         }
-        val detail = outcome.outcomes
-            .filterIsInstance<EnrichmentRunOutcome.Failure>()
-            .lastOrNull()
-            ?.code
-            ?.safeDetail
+        val detail = interruptionCause?.failureCode()?.safeDetail
+            ?: outcome.outcomes
+                .filterIsInstance<EnrichmentRunOutcome.Failure>()
+                .lastOrNull()
+                ?.code
+                ?.safeDetail
             ?: "Local enrichment needs attention."
         return "$lead: $counts $detail Existing raw transcripts were not changed."
     }
@@ -740,11 +911,13 @@ object EnrichmentRuntimeStore {
         val enrichmentDao: EnrichmentDao,
         val store: RoomNightEnrichmentStore,
         val cacheDirectory: File,
+        val interruptionJournal: EnrichmentInterruptionJournal,
     )
 
     private data class EnrichmentRequest(
         val runtime: RuntimeDependencies,
         val model: InstalledEnrichmentModel?,
+        val interruption: AtomicReference<EnrichmentInterruptionCause?>,
     )
 
     private enum class RuntimeOperation {
@@ -756,10 +929,93 @@ object EnrichmentRuntimeStore {
     }
 }
 
+internal fun recoveredEnrichmentFailureDetail(
+    cause: EnrichmentInterruptionCause?,
+): String = (cause?.failureCode() ?: EnrichmentFailureCode.UNKNOWN_PROCESS_LOSS)
+    .persistedFailureDetail()
+
+internal fun shouldReportRecoveredEnrichmentInterruption(
+    recoveredRunCount: Int,
+    requestedNightStates: List<String?>,
+): Boolean = recoveredRunCount > 0 ||
+    (
+        requestedNightStates.isNotEmpty() &&
+            requestedNightStates.any { state -> state != ProcessingState.COMPLETE }
+        )
+
+private fun recoveredEnrichmentMessage(
+    cause: EnrichmentInterruptionCause?,
+): String = when (cause) {
+    EnrichmentInterruptionCause.APP_HIDDEN ->
+        "Enrichment stopped because DreamLog was hidden. Saved work and raw transcripts remain; " +
+            "unfinished nights are ready to retry."
+
+    EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED ->
+        "Enrichment stopped because the screen turned off or the phone locked. Saved work and " +
+            "raw transcripts remain; unfinished nights are ready to retry."
+
+    EnrichmentInterruptionCause.USER_CANCELLED ->
+        "Enrichment stopped at your request. Saved work and raw transcripts remain; unfinished " +
+            "nights are ready to retry."
+
+    null ->
+        "DreamLog stopped before enrichment completed. Saved work and raw transcripts remain; " +
+            "unfinished nights are ready to retry."
+}
+
+private class EnrichmentInterruptionJournal(context: Context) {
+    private val preferences = context.getSharedPreferences(
+        ENRICHMENT_INTERRUPTION_PREFERENCES,
+        Context.MODE_PRIVATE,
+    )
+
+    fun begin(requestedNightIds: List<String>): Boolean {
+        if (isActive()) return false
+        return preferences.edit()
+            .clear()
+            .putBoolean(ENRICHMENT_INTERRUPTION_ACTIVE_KEY, true)
+            .putStringSet(ENRICHMENT_INTERRUPTION_NIGHT_IDS_KEY, requestedNightIds.toSet())
+            .commit()
+    }
+
+    fun record(cause: EnrichmentInterruptionCause): Boolean = preferences.edit()
+        .putBoolean(ENRICHMENT_INTERRUPTION_ACTIVE_KEY, true)
+        .putString(ENRICHMENT_INTERRUPTION_CAUSE_KEY, cause.name)
+        .commit()
+
+    fun isActive(): Boolean =
+        preferences.getBoolean(ENRICHMENT_INTERRUPTION_ACTIVE_KEY, false)
+
+    fun requestedNightIds(): List<String> {
+        if (!isActive()) return emptyList()
+        return preferences.getStringSet(ENRICHMENT_INTERRUPTION_NIGHT_IDS_KEY, emptySet())
+            .orEmpty()
+            .asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+            .toList()
+    }
+
+    fun recoveredCause(): EnrichmentInterruptionCause? {
+        if (!isActive()) return null
+        val persisted = preferences.getString(ENRICHMENT_INTERRUPTION_CAUSE_KEY, null)
+        return persisted?.let { value ->
+            runCatching { EnrichmentInterruptionCause.valueOf(value) }.getOrNull()
+        }
+    }
+
+    fun clear(): Boolean = preferences.edit().clear().commit()
+}
+
 private val SELECTED_BACKEND = LiteRtEnrichmentBackend.GPU
 private const val BYTES_PER_MEBIBYTE = 1024.0 * 1024.0
 private const val APP_OPEN_MESSAGE =
-    "Keep DreamLog open while local enrichment runs; Android process loss makes it retryable."
+    "DreamLog is keeping the screen awake. Keep it visible and unlocked while enrichment runs."
+private const val ENRICHMENT_INTERRUPTION_PREFERENCES = "enrichment_interruption"
+private const val ENRICHMENT_INTERRUPTION_ACTIVE_KEY = "active"
+private const val ENRICHMENT_INTERRUPTION_CAUSE_KEY = "cause"
+private const val ENRICHMENT_INTERRUPTION_NIGHT_IDS_KEY = "requested_night_ids"
 internal const val INTERRUPTED_ENRICHMENT_FAILURE_DETAIL =
     "Local enrichment was interrupted before completion. The raw transcript remains reviewable. " +
         "[code=interrupted; retryable=true]"

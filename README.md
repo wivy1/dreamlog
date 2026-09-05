@@ -24,8 +24,6 @@ Record dreams without sitting up, looking at a screen, or typing. DreamLog trans
 
 ## Screenshots
 
-These screenshots use sample history and a generic dream.
-
 <table>
   <tr>
     <td width="25%" valign="top">
@@ -73,4 +71,4 @@ Third-party runtimes, models, assets, licenses, and exact artifact provenance ar
 
 ## License
 
-MIT.
+MIT

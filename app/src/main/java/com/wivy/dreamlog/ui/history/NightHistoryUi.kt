@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -35,7 +36,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.wivy.dreamlog.capture.CueAudioPreflight
 import com.wivy.dreamlog.capture.SessionIncompleteReason
@@ -61,71 +61,7 @@ import com.wivy.dreamlog.playback.RawSessionPlayer
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 
-@Composable
-fun MorningSummaryCard(
-    record: NightRecord,
-    onOpenNight: (String) -> Unit,
-) {
-    val night = record.night
-    HistoryCard(title = "Morning summary") {
-        SummaryRow("Night", HistoryFormatters.date(night.displayDate))
-        SummaryRow("Status", nightStatus(night.captureState, night.interrupted))
-        SummaryRow(
-            "Monitoring",
-            monitoringRange(record),
-        )
-        SummaryRow(
-            "Wakewords",
-            wakewordCountText(record),
-        )
-        night.endReason?.let { SummaryRow("End reason", humanizeReason(it)) }
-        if (
-            night.lastHeartbeatEpochMillis != null &&
-            (
-                night.interrupted ||
-                    night.hadMicrophoneSilencing ||
-                    night.hadAudioGap
-                )
-        ) {
-            SummaryRow(
-                "Last heartbeat",
-                HistoryFormatters.dateTime(
-                    night.lastHeartbeatEpochMillis,
-                    night.lastHeartbeatUtcOffsetSeconds,
-                ),
-            )
-        }
-        SummaryRow("Raw audio", rawAudioText(record))
-        SummaryRow(
-            "Transcription",
-            transcriptionProcessingText(record),
-        )
-        SummaryRow(
-            "Enrichment",
-            enrichmentProcessingText(
-                night.enrichmentState,
-                night.enrichmentFailure,
-                night.transcriptionState,
-            ),
-        )
-
-        if (night.reportedSessionCount == 0) {
-            SupportingText(
-                "No wake-triggered narratives were captured. DreamLog did not store " +
-                    "full-night room audio.",
-            )
-        }
-        captureEvidence(record)?.let { WarningText(it) }
-        night.importWarning?.let { WarningText(it) }
-
-        OutlinedButton(
-            onClick = { onOpenNight(night.nightId) },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Open night details")
-        }
-    }
-}
+internal const val NO_SPEECH_RECOGNIZED_TEXT = "No speech recognized"
 
 @Composable
 fun NightHistorySection(
@@ -141,10 +77,9 @@ fun NightHistorySection(
             text = "History",
             modifier = Modifier.semantics { heading() },
             style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
         )
         when {
-            loading -> SupportingText("Loading private local history…")
+            loading -> SupportingText("Loading history…")
 
             error != null -> {
                 WarningText(error)
@@ -152,18 +87,18 @@ fun NightHistorySection(
                     onClick = onRetry,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Retry history")
+                    Text("Retry")
                 }
             }
 
             else -> {
                 if (warningCount > 0) {
                     WarningText(
-                        "Some capture evidence could not be fully reconciled automatically.",
+                        "Capture evidence unmatched. Open a night for details.",
                     )
                 }
                 if (nights.isEmpty()) {
-                    SupportingText("Completed and interrupted nights will appear here.")
+                    SupportingText("No nights yet.")
                 } else {
                     nights.forEach { record ->
                         HistoryRow(record, onOpenNight)
@@ -196,22 +131,22 @@ fun NightDetailScreen(
     onReprocessNight: (String) -> Unit = {},
     onExportNight: (String) -> Unit = {},
     onDeleteNightRawAudio: (String, (String?) -> Unit) -> Unit = { _, completion ->
-        completion("Raw-audio deletion is unavailable.")
+        completion("Recording deletion unavailable.")
     },
     onDeleteWholeNight: (String, (String?) -> Unit) -> Unit = { _, completion ->
-        completion("Whole-night deletion is unavailable.")
+        completion("Night deletion unavailable.")
     },
     onMarkCaptureIssueReviewed: (String, (String?) -> Unit) -> Unit = { _, completion ->
-        completion("Capture issue review is unavailable.")
+        completion("Capture review unavailable.")
     },
     onShowCaptureIssueAgain: (String, (String?) -> Unit) -> Unit = { _, completion ->
-        completion("Capture issue review is unavailable.")
+        completion("Capture review unavailable.")
     },
     onInspectNightAudio: (
         String,
         (NightAudioArtifactInspection?, String?) -> Unit,
     ) -> Unit = { _, completion ->
-        completion(null, "Saved-audio inspection is unavailable.")
+        completion(null, "Audio check unavailable.")
     },
 ) {
     val context = LocalContext.current
@@ -265,7 +200,7 @@ fun NightDetailScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    OutlinedButton(onClick = onBack) {
+                    TextButton(onClick = onBack) {
                         Text("Back")
                     }
                     Text(
@@ -273,10 +208,9 @@ fun NightDetailScreen(
                         modifier = Modifier
                             .weight(1f)
                             .semantics { heading() },
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.titleLarge,
                     )
-                    OutlinedButton(
+                    TextButton(
                         onClick = { record?.night?.nightId?.let(onExportNight) },
                         enabled = record != null && !reviewActionsBlocked,
                     ) {
@@ -289,7 +223,7 @@ fun NightDetailScreen(
                 item {
                     HistoryCard(title = "Night unavailable") {
                         SupportingText(
-                            "This night is no longer present in private local history.",
+                            "Night not found.",
                         )
                     }
                 }
@@ -332,21 +266,21 @@ fun NightDetailScreen(
                             onMarkCaptureIssueReviewed = {
                                 onMarkCaptureIssueReviewed(record.night.nightId) { error ->
                                     captureIssueReviewMessage = error
-                                        ?: "Capture evidence marked reviewed. It remains preserved below."
+                                        ?: "Marked reviewed."
                                 }
                             },
                             onShowCaptureIssueAgain = {
                                 onShowCaptureIssueAgain(record.night.nightId) { error ->
                                     captureIssueReviewMessage = error
-                                        ?: "Capture evidence will be shown as an issue again."
+                                        ?: "Issue shown again."
                                 }
                             },
                             onInspectNightAudio = {
-                                audioInspectionMessage = "Checking saved audio files…"
+                                audioInspectionMessage = "Checking recordings…"
                                 onInspectNightAudio(record.night.nightId) { inspection, error ->
                                     audioInspectionMessage = error
                                         ?: inspection?.let(::nightAudioInspectionText)
-                                        ?: "The saved-audio check returned no result."
+                                        ?: "Audio check returned no result."
                                 }
                             },
                         )
@@ -436,32 +370,37 @@ private fun HistoryRow(
             containerColor = MaterialTheme.colorScheme.surfaceContainer,
         ),
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .heightIn(min = 72.dp)
+                .padding(horizontal = 20.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(
-                text = HistoryFormatters.date(night.displayDate),
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = dreamCountText(record),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = HistoryFormatters.date(night.displayDate),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    text = dreamCountText(record),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(
                 text = status,
                 color = if (historyStatusIsError(record)) {
                     MaterialTheme.colorScheme.error
                 } else {
-                    MaterialTheme.colorScheme.primary
+                    MaterialTheme.colorScheme.onSurfaceVariant
                 },
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.bodySmall,
             )
         }
     }
@@ -483,29 +422,33 @@ private fun NightOutcomeSummary(
         .distinct()
         .count()
         .coerceAtMost(record.sessions.size)
+    val noRecognizedSpeech = !transcriptionRunning &&
+        record.dreams.isEmpty() &&
+        record.night.enrichmentState in setOf(
+            ProcessingState.NOT_STARTED,
+            ProcessingState.WAITING_FOR_TRANSCRIPTION,
+        ) && record.hasNoRecognizedSpeech
 
-    HistoryCard(title = "Night outcome") {
-        SummaryRow("Night", HistoryFormatters.date(record.night.displayDate))
+    HistoryCard(title = "Night summary") {
         SummaryRow(
             "Dreams",
             when {
-                record.dreams.size == 1 -> "1 generated dream"
-                record.dreams.isNotEmpty() -> "${record.dreams.size} generated dreams"
+                record.dreams.size == 1 -> "1 dream"
+                record.dreams.isNotEmpty() -> "${record.dreams.size} dreams"
                 record.night.enrichmentState == ProcessingState.COMPLETE ->
-                    "No generated dreams identified"
-                else -> "Not generated yet"
+                    "None identified"
+                noRecognizedSpeech -> NO_SPEECH_RECOGNIZED_TEXT
+                else -> "Not enriched yet"
             },
         )
         when {
             transcriptionRunning -> SupportingText(
-                "Transcribing $completedCount/${record.sessions.size}. You may turn off the " +
-                    "screen; follow progress in the ongoing notification.",
+                "Transcribing $completedCount/${record.sessions.size}. Screen can be off.",
             )
 
             resumeAction != null -> {
                 WarningText(
-                    "Transcription stopped before every retained session finished. Resume to " +
-                        "continue from the preserved result.",
+                    "Transcription stopped. Resume below.",
                 )
                 Button(
                     onClick = onResumeTranscription,
@@ -513,12 +456,11 @@ private fun NightOutcomeSummary(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
-                        "Resume transcription — ${resumeAction.completedCount} of " +
-                            "${resumeAction.totalCount} complete",
+                        "Resume transcription (${resumeAction.completedCount}/${resumeAction.totalCount})",
                     )
                 }
                 if (!transcriptionAvailable) {
-                    SupportingText("Set up the local transcription model in Settings first.")
+                    SupportingText("Set up transcription in Settings.")
                 }
             }
 
@@ -527,16 +469,17 @@ private fun NightOutcomeSummary(
             )
 
             captureEvidence(record) != null -> WarningText(
-                "A capture issue was recorded. Technical details contain the preserved evidence.",
+                "Capture issue. See Technical details.",
             )
 
-            record.dreams.isNotEmpty() ->
-                SupportingText("Open a dream above to view its generated text and sources.")
+            record.dreams.isNotEmpty() -> Unit
 
             record.night.enrichmentState == ProcessingState.COMPLETE ->
-                SupportingText("Processing completed without identifying a dream.")
+                SupportingText("Processing complete.")
 
-            else -> SupportingText("Finish the morning processing steps from Home.")
+            noRecognizedSpeech -> Unit
+
+            else -> SupportingText("Continue processing from Home.")
         }
     }
 }
@@ -544,20 +487,17 @@ private fun NightOutcomeSummary(
 internal fun enrichmentFailureWarningText(failure: String?): String =
     when {
         persistedEnrichmentFailureIsRetryable(failure) ->
-            "Dream generation failed. Return Home and choose Enrich to retry; the completed " +
-                "raw transcript was preserved."
+            "Enrichment failed. Retry with Enrich on Home."
 
         persistedEnrichmentFailureCode(failure) ==
             EnrichmentFailureCode.RAW_SOURCE_UNAVAILABLE.persistedValue ->
-            "Dream generation failed. The raw transcript was not fully available, so this " +
-                "failure cannot be retried from this night."
+            "Enrichment failed: raw transcript incomplete or unavailable. This night can't be retried."
 
         persistedEnrichmentFailureCode(failure) ==
             EnrichmentFailureCode.INVALID_SOURCE.persistedValue ->
-            "Dream generation failed. The ordered raw transcript source was invalid, so this " +
-                "failure cannot be retried from this night."
+            "Enrichment failed: invalid raw transcript source. This night can't be retried."
 
-        else -> "Dream generation failed. This failure cannot be retried from this night."
+        else -> "Enrichment failed. This night can't be retried."
     }
 
 internal data class NightOutcomeResumeAction(
@@ -622,7 +562,7 @@ private fun NightDetailSummary(
         SummaryRow("Wakewords", wakewordCountText(record))
         SummaryRow(
             "Dreams",
-            if (record.dreams.size == 1) "1 processed dream" else "${record.dreams.size} processed dreams",
+            if (record.dreams.size == 1) "1 dream" else "${record.dreams.size} dreams",
         )
         night.endReason?.let { SummaryRow("End reason", humanizeReason(it)) }
         night.lastHeartbeatEpochMillis?.let {
@@ -645,6 +585,7 @@ private fun NightDetailSummary(
                 night.enrichmentState,
                 night.enrichmentFailure,
                 night.transcriptionState,
+                hasNoRecognizedSpeech = record.dreams.isEmpty() && record.hasNoRecognizedSpeech,
             ),
         )
         captureEvidenceDisplay?.let { evidence ->
@@ -654,7 +595,7 @@ private fun NightDetailSummary(
                     onClick = onShowCaptureIssueAgain,
                     enabled = !actionsBlocked,
                 ) {
-                    Text("Show as issue again")
+                    Text("Show issue again")
                 }
             } else {
                 WarningText(evidence)
@@ -673,14 +614,13 @@ private fun NightDetailSummary(
             onClick = onInspectNightAudio,
             enabled = !actionsBlocked && canInspectNightAudio(record),
         ) {
-            Text("Check saved audio files")
+            Text("Check recordings")
         }
         audioInspectionMessage?.let { message -> SupportingText(message) }
         night.importWarning?.let { WarningText(it) }
         if (night.reportedSessionCount == 0) {
             SupportingText(
-                "This night is empty because no approved wake phrase produced a retained " +
-                    "narrative. Idle room audio was never stored.",
+                "No wake-triggered recordings.",
             )
         }
     }
@@ -691,97 +631,92 @@ internal fun nightAudioInspectionText(
 ): String {
     if (!inspection.directoryPresent) {
         return if (inspection.recordedSessionCount == 0) {
-            "Saved audio check: this empty night has no saved audio directory. No files were changed."
+            "No recordings or audio directory."
         } else {
-            "Saved audio check: this night's saved audio directory is missing. No files were changed."
+            "Saved-audio directory missing."
         }
     }
 
     val parts = mutableListOf<String>()
     parts += when {
         inspection.recordedSessionCount == 0 ->
-            "Saved audio check: this night has no recorded sessions."
+            "No recorded sessions."
 
         inspection.recordedFinalValidCount == inspection.recordedSessionCount ->
-            "Saved audio check: all ${inspection.recordedSessionCount} recorded sessions have " +
-                "valid files."
+            "All ${inspection.recordedSessionCount} recordings verified."
 
         inspection.recordedFinalValidCount == 1 ->
-            "Saved audio check: 1 of ${inspection.recordedSessionCount} recorded sessions has " +
-                "a valid file."
+            "1 of ${inspection.recordedSessionCount} recordings verified."
 
         else ->
-            "Saved audio check: ${inspection.recordedFinalValidCount} of " +
-                "${inspection.recordedSessionCount} recorded sessions have valid files."
+            "${inspection.recordedFinalValidCount} of ${inspection.recordedSessionCount} " +
+                "recordings verified."
     }
 
     val missingRecorded =
         inspection.recordedSessionCount - inspection.recordedFinalPresentCount
     if (missingRecorded > 0) {
         parts += if (missingRecorded == 1) {
-            "1 recorded audio file is missing."
+            "1 recording missing."
         } else {
-            "$missingRecorded recorded audio files are missing."
+            "$missingRecorded recordings missing."
         }
     }
     val invalidRecorded =
         inspection.recordedFinalPresentCount - inspection.recordedFinalValidCount
     if (invalidRecorded > 0) {
         parts += if (invalidRecorded == 1) {
-            "1 recorded audio file could not be verified."
+            "1 recording unverified."
         } else {
-            "$invalidRecorded recorded audio files could not be verified."
+            "$invalidRecorded recordings unverified."
         }
     }
     if (inspection.extraFinalizedCandidateCount > 0) {
         parts += if (inspection.extraFinalizedCandidateCount == 1) {
-            "Found 1 additional finalized recording for this night."
+            "1 additional finalized recording."
         } else {
-            "Found ${inspection.extraFinalizedCandidateCount} additional finalized recordings " +
-                "for this night."
+            "${inspection.extraFinalizedCandidateCount} additional finalized recordings."
         }
     }
     if (inspection.partialFileCount > 0) {
         parts += if (inspection.partialFileCount == 1) {
-            "Found 1 partial audio file."
+            "1 partial audio file."
         } else {
-            "Found ${inspection.partialFileCount} partial audio files."
+            "${inspection.partialFileCount} partial audio files."
         }
     }
     if (inspection.extraUnverifiedFinalCount > 0) {
         parts += if (inspection.extraUnverifiedFinalCount == 1) {
-            "1 finalized file could not be verified."
+            "1 additional finalized file unverified."
         } else {
-            "${inspection.extraUnverifiedFinalCount} finalized files could not be verified."
+            "${inspection.extraUnverifiedFinalCount} additional finalized files unverified."
         }
     }
     if (inspection.extraFinalizedOutsideNightCount > 0) {
         parts += if (inspection.extraFinalizedOutsideNightCount == 1) {
-            "1 finalized recording is outside this night's time range."
+            "1 finalized recording outside this night's time range."
         } else {
-            "${inspection.extraFinalizedOutsideNightCount} finalized recordings are outside " +
+            "${inspection.extraFinalizedOutsideNightCount} finalized recordings outside " +
                 "this night's time range."
         }
     }
     if (inspection.metadataOnlyCount > 0) {
         parts += if (inspection.metadataOnlyCount == 1) {
-            "1 metadata-only entry remains."
+            "1 metadata-only entry."
         } else {
-            "${inspection.metadataOnlyCount} metadata-only entries remain."
+            "${inspection.metadataOnlyCount} metadata-only entries."
         }
     }
     if (inspection.metadataPartialCount > 0) {
         parts += if (inspection.metadataPartialCount == 1) {
-            "1 unfinished metadata entry remains."
+            "1 unfinished metadata entry."
         } else {
-            "${inspection.metadataPartialCount} unfinished metadata entries remain."
+            "${inspection.metadataPartialCount} unfinished metadata entries."
         }
     }
 
     if (parts.size == 1) {
-        parts += "No additional finalized or partial audio was found."
-    } else {
-        parts += "No files were changed."
+        parts += "No additional recordings or partial files."
     }
     return parts.joinToString(" ")
 }
@@ -810,13 +745,12 @@ private fun SessionEvidenceSection(
             text = "Raw session evidence",
             modifier = Modifier.semantics { heading() },
             style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
         )
         if (playbackBlocked) {
-            WarningText("Playback is disabled while capture or local processing is active.")
+            WarningText("Playback unavailable during capture or processing.")
         }
         if (record.sessions.isEmpty()) {
-            SupportingText("No wake-triggered session audio belongs to this night.")
+            SupportingText("No wake-triggered recordings.")
         } else {
             record.sessions.forEachIndexed { index, session ->
                 SessionCard(
@@ -862,20 +796,18 @@ private fun RawTranscriptSection(
             text = "Raw transcript",
             modifier = Modifier.semantics { heading() },
             style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
         )
         if (transcriptionRunning) {
             SupportingText(
-                "Local transcription may continue with the screen off; follow progress in the " +
-                    "ongoing notification.",
+                "Transcribing. Screen can be off.",
             )
         }
         transcriptionMessage?.let { SupportingText(it) }
 
         if (record.sessions.isEmpty()) {
-            SupportingText("This night has no retained narrative to transcribe.")
+            SupportingText("No recordings to transcribe.")
         } else if (record.transcripts.isEmpty() && !hasUnstartedRetainedSession) {
-            SupportingText("No retained session audio is available for transcription.")
+            SupportingText("No retained audio to transcribe.")
         }
 
         record.transcripts.forEachIndexed { index, transcript ->
@@ -899,10 +831,10 @@ private fun RawTranscriptSection(
                 enabled = transcriptionAvailable && !transcriptionRunning && !actionsBlocked,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(if (transcriptionRunning) "Transcribing…" else "Transcribe this night")
+                Text(if (transcriptionRunning) "Transcribing…" else "Transcribe night")
             }
             if (!transcriptionAvailable) {
-                SupportingText("Install the local transcription model from the home screen first.")
+                SupportingText("Set up transcription in Settings.")
             }
         }
     }
@@ -929,20 +861,19 @@ private fun TranscriptCard(
         ),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
                 text = "Session ${(session?.captureOrder ?: index) + 1}",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
             )
             SummaryRow("State", processingText(value.state, value.failureDetail, "Not started"))
             when (value.state) {
                 ProcessingState.COMPLETE -> {
                     val rawText = value.rawText.orEmpty()
                     Text(
-                        text = rawText.ifBlank { "No speech was recognized." },
+                        text = rawText.ifBlank { "No speech recognized." },
                         style = MaterialTheme.typography.bodyLarge,
                     )
                     transcript.segments.chunked(TRANSCRIPT_SEGMENTS_PER_PLAYBACK_ROW)
@@ -991,41 +922,38 @@ private fun TranscriptCard(
                                 session?.audioState == AudioEvidenceState.RETAINED,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("Re-transcribe this session")
+                        Text("Re-transcribe session")
                     }
                     if (ownerChangesProtected) {
                         SupportingText(
-                            "Re-transcription is disabled because owner edits or deletions depend " +
-                                "on this raw evidence. DreamLog will not replace them silently.",
+                            "Your edits or deletions prevent re-transcription.",
                         )
                     }
                 }
 
                 ProcessingState.FAILED -> {
-                    WarningText(value.failureDetail ?: "Local transcription failed.")
+                    WarningText(value.failureDetail ?: "Transcription failed.")
                     if (session?.audioState == AudioEvidenceState.RETAINED) {
                         Button(
                             onClick = onRetry,
                             enabled = retryEnabled && !actionsBlocked,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text("Retry this session")
+                            Text("Retry session")
                         }
                     } else {
                         SupportingText(
-                            "Retry is unavailable because this session no longer has retained " +
-                                "source audio.",
+                            "Retry unavailable: no retained source audio.",
                         )
                     }
                 }
 
                 ProcessingState.RUNNING ->
                     SupportingText(
-                        "Transcribing locally. You may turn off the screen and follow the ongoing " +
-                            "notification.",
+                        "Transcribing. Screen can be off.",
                     )
 
-                else -> SupportingText("Waiting for local transcription.")
+                else -> SupportingText("Waiting for transcription.")
             }
         }
     }
@@ -1055,13 +983,12 @@ private fun SessionCard(
         ),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
                 text = "Session ${index + 1}",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
             )
             SummaryRow(
                 "Started",
@@ -1114,20 +1041,18 @@ private fun HistoryCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         ),
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
                 text = title,
                 modifier = Modifier.semantics { heading() },
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
             )
-            HorizontalDivider()
             content()
         }
     }
@@ -1153,7 +1078,6 @@ private fun SummaryRow(
             text = value,
             modifier = Modifier.weight(0.62f),
             style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
         )
     }
 }
@@ -1182,8 +1106,7 @@ private fun PrivacyDetailFooter() {
         Spacer(Modifier.height(4.dp))
         HorizontalDivider()
         SupportingText(
-            "Raw audio remains in DreamLog's app-private local storage. Playback is visible " +
-                "and user initiated.",
+            "Recordings stay on this device.",
         )
     }
 }
@@ -1223,15 +1146,15 @@ internal fun wakewordCountText(record: NightRecord): String =
 
 internal fun rawAudioText(record: NightRecord): String =
     when (record.night.rawAudioState) {
-        RawAudioState.NONE -> "No triggered session audio"
+        RawAudioState.NONE -> "No recordings"
         RawAudioState.RETAINED ->
-            "${record.retainedSessionCount} retained app-private file(s)"
+            "${record.retainedSessionCount} recordings retained"
 
         RawAudioState.PARTIAL ->
             "${record.retainedSessionCount} retained · " +
                 "${record.unavailableSessionCount} unavailable"
 
-        RawAudioState.PENDING_RECOVERY -> "Recovery required before playback"
+        RawAudioState.PENDING_RECOVERY -> "Recover before playback"
         RawAudioState.UNAVAILABLE -> when {
             record.sessions.isNotEmpty() &&
                 record.sessions.all { it.audioState == AudioEvidenceState.DELETED } ->
@@ -1269,6 +1192,34 @@ internal fun historyProcessingFailure(record: NightRecord): String? = when {
     else -> null
 }
 
+internal val NightRecord.hasNoRecognizedSpeech: Boolean
+    get() {
+        if (
+            sessions.isEmpty() ||
+            night.transcriptionState != ProcessingState.COMPLETE ||
+            night.transcriptionFailure != null
+        ) {
+            return false
+        }
+        val sessionIds = sessions.mapTo(mutableSetOf(), CaptureSessionEntity::sessionId)
+        val transcriptSessionIds = transcripts.mapTo(mutableSetOf()) {
+            it.transcript.sessionId
+        }
+        if (
+            sessionIds.size != sessions.size ||
+            transcriptSessionIds.size != transcripts.size ||
+            transcriptSessionIds != sessionIds
+        ) {
+            return false
+        }
+        return transcripts.all { saved ->
+            saved.transcript.state == ProcessingState.COMPLETE &&
+                saved.transcript.failureDetail == null &&
+                saved.transcript.rawText?.isBlank() == true &&
+                saved.segments.isEmpty()
+        }
+    }
+
 internal fun historyStatus(record: NightRecord): String {
     historyProcessingFailure(record)?.let { return it }
     val processingStatus = when {
@@ -1277,6 +1228,11 @@ internal fun historyStatus(record: NightRecord): String {
         record.night.transcriptionState == ProcessingState.RUNNING -> "Transcribing"
         record.night.enrichmentState == ProcessingState.RUNNING -> "Enriching"
         record.night.enrichmentState == ProcessingState.COMPLETE -> "Complete"
+        record.dreams.isEmpty() &&
+            record.night.enrichmentState in setOf(
+                ProcessingState.NOT_STARTED,
+                ProcessingState.WAITING_FOR_TRANSCRIPTION,
+            ) && record.hasNoRecognizedSpeech -> NO_SPEECH_RECOGNIZED_TEXT
         record.night.transcriptionState == ProcessingState.COMPLETE -> "Ready to enrich"
         record.sessions.isEmpty() &&
             record.night.captureState == NightCaptureState.ENDED &&
@@ -1317,14 +1273,14 @@ internal fun morningDiagnostics(record: NightRecord): List<String> {
             night.captureState == NightCaptureState.INTERRUPTED ||
             night.captureState == NightCaptureState.RECOVERY_REQUIRED
         ) {
-            add("monitoring was interrupted; review the end reason and incomplete sessions below")
+            add("monitoring interrupted; check the end reason and incomplete sessions")
         }
         val incompleteSessions = record.sessions.filter {
             CaptureIssueFingerprint.isOwnerFacingIncompleteSession(record, it)
         }
         if (incompleteSessions.isNotEmpty()) {
             add(
-                "${incompleteSessions.size} captured recollection(s) did not finish cleanly",
+                "incomplete sessions: ${incompleteSessions.size}",
             )
         }
         val unavailableSessions = record.sessions.filter {
@@ -1334,18 +1290,17 @@ internal fun morningDiagnostics(record: NightRecord): List<String> {
         }
         if (unavailableSessions.isNotEmpty()) {
             add(
-                "${unavailableSessions.size} captured recollection(s) have missing, corrupt, " +
-                    "or unresolved source audio",
+                "sessions with missing, corrupt, or unresolved audio: ${unavailableSessions.size}",
             )
         }
         val persistedIncompleteSessionCount = record.sessions.count {
             it.incompleteReason != null
         }
         if (night.reportedIncompleteSessionCount > persistedIncompleteSessionCount) {
-            add("the night summary reports incomplete capture evidence that could not be matched")
+            add("unmatched incomplete-capture evidence")
         }
         if (night.reportedSessionCount > record.sessions.size) {
-            add("the night summary reports captured recollection evidence that is missing")
+            add("recorded session evidence missing")
         }
         captureFailureDiagnostics(record.events).forEach(::add)
         silencingDiagnostic(record)?.let(::add)
@@ -1367,14 +1322,12 @@ private fun audioGapDiagnostic(events: List<NightEventEntity>): String? {
     }.maxOrNull()
     return if (affected.size == 1) {
         largestEstimateMillis?.let { estimate ->
-            "an estimated $estimate ms audio-clock discontinuity was observed during an " +
-                "affected recollection"
-        } ?: "an audio-clock discontinuity was observed during an affected recollection"
+            "estimated audio-clock discontinuity: $estimate ms"
+        } ?: "audio-clock discontinuity detected"
     } else {
         buildString {
-            append("${affected.size} audio-clock discontinuities were observed during affected ")
-            append("recollections")
-            largestEstimateMillis?.let { append("; the largest estimate was $it ms") }
+            append("${affected.size} audio-clock discontinuities")
+            largestEstimateMillis?.let { append("; largest estimate: $it ms") }
         }
     }
 }
@@ -1409,7 +1362,7 @@ private fun silencingDiagnostic(record: NightRecord): String? {
                 "from $start to ${
                     HistoryFormatters.dateTime(endedAt, interval.endedUtcOffsetSeconds)
                 }"
-            } ?: "from $start; no recovery time was confirmed"
+            } ?: "from $start; recovery time unconfirmed"
         }
     }
     val retainedAudio = if (
@@ -1418,11 +1371,11 @@ private fun silencingDiagnostic(record: NightRecord): String? {
                 it.audioState == AudioEvidenceState.RETAINED
         }
     ) {
-        " Completed session audio was preserved."
+        " Completed audio retained."
     } else {
         ""
     }
-    return "Android reported DreamLog's microphone input as silenced $rangeText. " +
+    return "Android reported the microphone silenced $rangeText. " +
         "Stop other microphone recorders before the next night.$retainedAudio"
 }
 
@@ -1488,32 +1441,25 @@ private fun captureFailureDiagnostics(events: List<NightEventEntity>): List<Stri
         .map { kind ->
             when (kind) {
                 "storage_reserve" ->
-                    "capture reached the protected storage reserve; free device storage " +
-                        "before the next night, and review any finalized audio below"
+                    "storage reserve reached; free storage before the next night"
 
                 "audio_write" ->
-                    "DreamLog could not continue writing capture audio; check available " +
-                        "storage, and treat the affected narration as possibly incomplete"
+                    "audio write failed; check storage. Recording may be incomplete"
 
                 "initialization" ->
-                    "the on-device capture engine could not start; close other microphone " +
-                        "recorders, test the cue, refresh the start checks, and retry"
+                    "capture failed to start; close other recorders, test the cue, and retry"
 
                 "audio_read" ->
-                    "DreamLog could not continue reading microphone audio; review any finalized " +
-                        "audio below, then restart DreamLog before the next night"
+                    "microphone read failed; review recordings and restart DreamLog"
 
                 "cue_playback" ->
-                    "the acknowledgement cue could not be played; review any finalized audio " +
-                        "below, then test the cue in Settings before the next night"
+                    "cue failed; test it in Settings before the next night"
 
                 "journal" ->
-                    "capture evidence could not be written reliably; monitoring was interrupted " +
-                        "and finalized sessions remain listed below"
+                    "capture evidence write failed; monitoring interrupted"
 
                 else ->
-                    "capture failed unexpectedly; review the end reason and any finalized audio " +
-                        "below, then restart DreamLog before the next night"
+                    "capture failed; check the end reason and recordings, then restart DreamLog"
             }
         }
         .toList()
@@ -1522,8 +1468,7 @@ private fun heartbeatDiagnostic(record: NightRecord): String? {
     val night = record.night
     val recoveryClose = hasUnconfirmedRecoveryClose(record)
     if (recoveryClose && night.lastHeartbeatEpochMillis == null) {
-        return "No heartbeat was recorded before recovery. DreamLog cannot confirm how long " +
-            "listening continued after the start time."
+        return "No heartbeat before recovery; listening duration unconfirmed."
     }
     val heartbeatAt = night.lastHeartbeatEpochMillis ?: return null
     val formattedHeartbeat = HistoryFormatters.dateTime(
@@ -1536,8 +1481,7 @@ private fun heartbeatDiagnostic(record: NightRecord): String? {
         night.captureState == NightCaptureState.INTERRUPTED ||
         night.captureState == NightCaptureState.RECOVERY_REQUIRED
     ) {
-        return "The last confirmed heartbeat was $formattedHeartbeat. Monitoring may have " +
-            "continued afterward, but no later heartbeat was recorded."
+        return "Last confirmed heartbeat: $formattedHeartbeat. Later listening is unconfirmed."
     }
 
     return null
@@ -1560,14 +1504,13 @@ private fun expiredAudioText(record: NightRecord): String {
     return when {
         expiredSessionIds.isEmpty() -> "Audio expired"
         savedTranscriptCount == expiredSessionIds.size ->
-            "Audio expired; saved transcript text remains"
+            "Audio expired; transcript retained"
 
         savedTranscriptCount == 0 ->
-            "Audio expired before transcription; no transcript was saved"
+            "Audio expired; no transcript"
 
         else ->
-            "Audio expired; saved transcript text remains for $savedTranscriptCount of " +
-                "${expiredSessionIds.size} sessions"
+            "Audio expired; transcripts retained for $savedTranscriptCount/${expiredSessionIds.size} sessions"
     }
 }
 
@@ -1580,16 +1523,15 @@ private fun deletedAudioText(record: NightRecord): String {
             it.transcript.state == ProcessingState.COMPLETE
     }
     return when {
-        deletedSessionIds.isEmpty() -> "Deleted by owner"
+        deletedSessionIds.isEmpty() -> "Deleted"
         savedTranscriptCount == deletedSessionIds.size ->
-            "Deleted by owner; saved transcript text remains"
+            "Audio deleted; transcript retained"
 
         savedTranscriptCount == 0 ->
-            "Deleted by owner before transcription; no transcript was saved"
+            "Audio deleted; no transcript"
 
         else ->
-            "Deleted by owner; saved transcript text remains for $savedTranscriptCount of " +
-                "${deletedSessionIds.size} sessions"
+            "Audio deleted; transcripts retained for $savedTranscriptCount/${deletedSessionIds.size} sessions"
     }
 }
 
@@ -1633,7 +1575,7 @@ private fun processingText(
             add("Failed")
             failure?.let { add(humanizeReason(it)) }
             failedArtifactText?.let(::add)
-            if (failedRetryable) add("retry from this night")
+            if (failedRetryable) add("retry available")
         }.joinToString(" · ")
 
         else -> state.replace('_', ' ')
@@ -1655,9 +1597,9 @@ internal fun transcriptionProcessingText(record: NightRecord): String {
         failedRetryable = failedAudioRetained,
         failedArtifactText = if (record.night.transcriptionState == ProcessingState.FAILED) {
             if (failedAudioRetained) {
-                "Retained source audio remains available"
+                "Source audio retained"
             } else {
-                "Source audio for the failed session is unavailable; retry cannot run"
+                "Source audio unavailable; can't retry"
             }
         } else {
             null
@@ -1669,12 +1611,13 @@ internal fun enrichmentProcessingText(
     state: String,
     failure: String?,
     transcriptionState: String? = null,
+    hasNoRecognizedSpeech: Boolean = false,
 ): String =
     processingText(
         state = state,
         failure = persistedEnrichmentFailureDisplayDetail(failure),
         waitingText = if (transcriptionState == ProcessingState.COMPLETE) {
-            "Ready to enrich"
+            if (hasNoRecognizedSpeech) NO_SPEECH_RECOGNIZED_TEXT else "Ready to enrich"
         } else {
             "Waiting for transcription"
         },
@@ -1688,12 +1631,12 @@ internal fun enrichmentFailureArtifactText(state: String, failure: String?): Str
     } else {
         when (persistedEnrichmentFailureCode(failure)) {
             EnrichmentFailureCode.RAW_SOURCE_UNAVAILABLE.persistedValue ->
-                "The raw transcript was not fully available"
+                "Raw transcript incomplete or unavailable"
 
             EnrichmentFailureCode.INVALID_SOURCE.persistedValue ->
-                "The ordered raw transcript source was invalid"
+                "Invalid raw transcript source"
 
-            else -> "The raw transcript was preserved"
+            else -> "Raw transcript retained"
         }
     }
 
@@ -1712,19 +1655,19 @@ private fun nightStatus(
 
 internal fun audioEvidenceText(state: String, hasSavedTranscript: Boolean? = null): String =
     when (state) {
-        AudioEvidenceState.RETAINED -> "Retained locally"
+        AudioEvidenceState.RETAINED -> "Retained"
         AudioEvidenceState.MISSING -> "Missing"
         AudioEvidenceState.CORRUPT -> "Corrupt"
         AudioEvidenceState.PENDING_RECOVERY -> "Pending recovery"
         AudioEvidenceState.DELETED -> when (hasSavedTranscript) {
-            true -> "Deleted by owner; saved transcript text remains"
-            false -> "Deleted by owner before transcription; no transcript was saved"
-            null -> "Deleted by owner"
+            true -> "Audio deleted; transcript retained"
+            false -> "Audio deleted; no transcript"
+            null -> "Deleted"
         }
         AudioEvidenceState.EXPIRED -> if (hasSavedTranscript == true) {
-            "Audio expired; saved transcript text remains"
+            "Audio expired; transcript retained"
         } else {
-            "Audio expired before transcription; no transcript was saved"
+            "Audio expired; no transcript"
         }
         else -> state.replace('_', ' ')
     }
@@ -1745,18 +1688,18 @@ private fun playbackButtonText(
 
 private fun humanizeReason(reason: String): String =
     when (reason) {
-        "owner_ended", "night_ended" -> "Ended by owner"
-        "process_interrupted" -> "App process interrupted"
+        "owner_ended", "night_ended" -> "Ended manually"
+        "process_interrupted" -> "App interrupted"
         "capture_failed" -> "Capture failed"
         "audio_initialization_failed" -> "Microphone initialization failed"
-        "storage_reserve_reached" -> "Protected storage reserve reached"
+        "storage_reserve_reached" -> "Storage reserve reached"
         "safety_stop" -> "14-hour safety stop"
         "service_interrupted" -> "Listening service interrupted"
         "microphone_silenced" -> "Microphone silenced"
         "audio_gap" -> "Audio gap"
         "write_failed" -> "Audio write failed"
-        "start_unconfirmed" -> "Listening start was not confirmed"
-        "recovery_required" -> "Interrupted night needs recovery"
+        "start_unconfirmed" -> "Listening start unconfirmed"
+        "recovery_required" -> "Recovery required"
         else -> reason.replace('_', ' ')
     }
 

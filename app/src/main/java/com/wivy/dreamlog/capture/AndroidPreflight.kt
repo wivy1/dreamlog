@@ -71,6 +71,8 @@ object AndroidPreflight {
                 priorCaptureStateResolved = priorCaptureStateResolved,
                 cueVolumeReady = cueAudioStatus?.volumeMayBeTooLow != true,
                 cuePlaybackAllowed = cueAudioStatus?.mediaAllowedByActiveFilter != false,
+                cueOutputMayBypassPhoneSpeaker =
+                    cueAudioStatus?.outputRoute?.mayBypassPhoneSpeaker == true,
                 charging = charging,
                 priorBatteryInterruption = priorInterruption,
                 cueVolumeTested = cueTestedThisVisit,

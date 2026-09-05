@@ -61,13 +61,12 @@ internal data class TranscriptionThermalSignal(
 )
 
 /**
- * Defers at MODERATE platform pressure or 36.0 C battery temperature, then requires both public
- * signals to recover (LIGHT-or-lower and at most 35.5 C) before clearing the latch.
+ * Defers at SEVERE platform pressure or 45.0 C battery temperature. Recovery requires
+ * MODERATE-or-lower status and at most 42.0 C, including after a persisted thermal pause.
  *
- * Android's public thermal status is the primary signal. The battery-temperature boundary is a
- * measured Pixel backstop for the Night 1 charging-warmth failure, not a substitute estimate of
- * platform thermal pressure. Both signals use hysteresis so a warm/cool boundary cannot repeatedly
- * load and release the 663 MB ASR model.
+ * Android's public thermal status is primary. The battery boundary is an app backstop, not a
+ * device safety limit. Battery hysteresis permits ordinary charging warmth while avoiding
+ * repeated model loads near the pause threshold.
  */
 internal class TranscriptionThermalPolicy(
     private val currentSignal: () -> TranscriptionThermalSignal,
@@ -79,12 +78,12 @@ internal class TranscriptionThermalPolicy(
         val signal = currentSignal()
         val batteryTemperature = signal.batteryTemperatureDeciCelsius
         if (
-            signal.platformStatus >= PowerManager.THERMAL_STATUS_MODERATE ||
+            signal.platformStatus >= PowerManager.THERMAL_STATUS_SEVERE ||
             batteryTemperature?.let { it >= DEFER_BATTERY_TEMPERATURE_DECI_CELSIUS } == true
         ) {
             warmLatch = true
         } else if (
-            signal.platformStatus <= PowerManager.THERMAL_STATUS_LIGHT &&
+            signal.platformStatus <= PowerManager.THERMAL_STATUS_MODERATE &&
             (batteryTemperature == null ||
                 batteryTemperature <= RESUME_BATTERY_TEMPERATURE_DECI_CELSIUS)
         ) {
@@ -103,9 +102,8 @@ internal class TranscriptionThermalPolicy(
 
     companion object {
         const val THERMAL_DEFER_MESSAGE =
-            "Device temperature is elevated. Transcription is paused until the battery cools " +
-                "and Android reports light or no thermal pressure; retained audio is safe."
-        const val DEFER_BATTERY_TEMPERATURE_DECI_CELSIUS = 360
-        const val RESUME_BATTERY_TEMPERATURE_DECI_CELSIUS = 355
+            "Transcription paused for heat. Resume when the phone cools."
+        const val DEFER_BATTERY_TEMPERATURE_DECI_CELSIUS = 450
+        const val RESUME_BATTERY_TEMPERATURE_DECI_CELSIUS = 420
     }
 }

@@ -16,6 +16,7 @@ data class PreflightInput(
     val priorBatteryInterruption: Boolean,
     val cueVolumeTested: Boolean,
     val otherRecorderConfirmedStopped: Boolean,
+    val cueOutputMayBypassPhoneSpeaker: Boolean = false,
 )
 
 enum class PreflightIssueCode {
@@ -30,6 +31,7 @@ enum class PreflightIssueCode {
     PRIOR_CAPTURE_UNRESOLVED,
     CUE_VOLUME_TOO_LOW,
     CUE_PLAYBACK_BLOCKED,
+    CUE_OUTPUT_MAY_BYPASS_PHONE_SPEAKER,
     NOT_CHARGING,
     PRIOR_BATTERY_INTERRUPTION,
     CUE_VOLUME_UNTESTED,
@@ -53,6 +55,7 @@ enum class PreflightRemediationCode {
     RESOLVE_PRIOR_CAPTURE,
     ADJUST_CUE_VOLUME,
     ALLOW_CUE_PLAYBACK,
+    CHECK_CUE_OUTPUT,
     CONNECT_CHARGER,
     REVIEW_BATTERY_SETTINGS,
     TEST_CUE_VOLUME,
@@ -144,6 +147,11 @@ object PreflightEvaluator {
         }
 
         val warnings = buildList {
+            addWarningUnless(
+                !input.cueOutputMayBypassPhoneSpeaker,
+                PreflightIssueCode.CUE_OUTPUT_MAY_BYPASS_PHONE_SPEAKER,
+                PreflightRemediationCode.CHECK_CUE_OUTPUT,
+            )
             addWarningUnless(
                 input.charging,
                 PreflightIssueCode.NOT_CHARGING,

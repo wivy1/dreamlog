@@ -38,7 +38,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.wivy.dreamlog.capture.CueAudioPreflight
@@ -64,23 +63,26 @@ fun ProcessedDreamSection(
 ) {
     val mediaPlaybackSessionIds = mediaPlaybackActiveAtWakeSessionIds(record.events)
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(
-            text = "Dreams",
-            modifier = Modifier.semantics { heading() },
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Dreams",
+                modifier = Modifier.weight(1f).semantics { heading() },
+                style = MaterialTheme.typography.headlineSmall,
+            )
+            if (record.dreams.isNotEmpty()) {
+                Text(
+                    text = dreamCountText(record),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+        }
         when {
             record.dreams.isNotEmpty() -> {
-                Text(
-                    text = if (record.dreams.size == 1) {
-                        "1 processed dream"
-                    } else {
-                        "${record.dreams.size} processed dreams"
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
                 record.dreams.forEachIndexed { index, dream ->
                     DreamCard(
                         dream = dream,
@@ -94,16 +96,21 @@ fun ProcessedDreamSection(
             }
 
             record.night.enrichmentState == ProcessingState.COMPLETE ->
-                SupportingDreamText("No processed dreams were identified for this night.")
+                SupportingDreamText("No dreams identified.")
 
             record.night.enrichmentState == ProcessingState.FAILED ->
                 SupportingDreamText(
-                    "Processed dreams are unavailable. The raw transcript remains below.",
+                    "Enrichment failed. See the raw transcript in Technical details.",
                     warning = true,
                 )
 
+            record.night.enrichmentState in setOf(
+                ProcessingState.NOT_STARTED,
+                ProcessingState.WAITING_FOR_TRANSCRIPTION,
+            ) && record.hasNoRecognizedSpeech -> SupportingDreamText(NO_SPEECH_RECOGNIZED_TEXT)
+
             else -> SupportingDreamText(
-                "Processed dreams will appear after this night is enriched locally.",
+                "Dreams appear after enrichment.",
             )
         }
     }
@@ -124,8 +131,8 @@ private fun DreamCard(
         ),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -136,7 +143,6 @@ private fun DreamCard(
                     text = dreamDisplayTitle(dream, index),
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
                 )
                 if (dream.dream.ownerEdited) {
                     Text(
@@ -161,16 +167,9 @@ private fun DreamCard(
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyLarge,
             )
-            SupportingDreamText(
-                if (dream.sourceSpans.size == 1) {
-                    "1 retained source mapping"
-                } else {
-                    "${dream.sourceSpans.size} ordered source mappings"
-                },
-            )
-            OutlinedButton(
+            TextButton(
                 onClick = onOpen,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.align(Alignment.End),
             ) {
                 Text("Review dream")
             }
@@ -191,7 +190,7 @@ internal fun dreamDisplayTitle(dream: DreamRecord, index: Int): String =
 internal fun dreamReviewStatusText(dream: DreamRecord): String? = when {
     dream.dream.kind == DreamKind.FRAGMENT && dream.dream.isUncertain -> "Uncertain fragment"
     dream.dream.kind == DreamKind.FRAGMENT -> "Fragment"
-    dream.dream.isUncertain -> "Some details uncertain"
+    dream.dream.isUncertain -> "Uncertain details"
     else -> null
 }
 
@@ -299,15 +298,13 @@ fun DreamDetailScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    OutlinedButton(onClick = requestBack) { Text("Back") }
+                    TextButton(onClick = requestBack) { Text("Back") }
                     Text(
-                        text = displayedDream?.let { dreamDisplayTitle(it, it.dream.dreamOrder) }
-                            ?: "Dream unavailable",
+                        text = if (displayedDream != null) "Dream" else "Dream unavailable",
                         modifier = Modifier
                             .weight(1f)
                             .semantics { heading() },
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.headlineSmall,
                     )
                 }
             }
@@ -316,7 +313,7 @@ fun DreamDetailScreen(
                 record == null -> item {
                     DreamReviewCard("Dream unavailable") {
                         SupportingDreamText(
-                            "The parent night is no longer present in private local history.",
+                            "Night not found.",
                         )
                     }
                 }
@@ -324,8 +321,7 @@ fun DreamDetailScreen(
                 recentlyDeleted && currentDream == null && deletedSnapshot != null -> item {
                     DreamReviewCard("Dream deleted") {
                         SupportingDreamText(
-                            "This dream is hidden from the log and playback. Its underlying raw " +
-                                "session audio remains under the night retention policy.",
+                            "Recordings remain until expiry.",
                         )
                         Button(
                             onClick = {
@@ -342,7 +338,7 @@ fun DreamDetailScreen(
                             enabled = !mutationBlocked,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text("Undo deletion")
+                            Text("Undo")
                         }
                     }
                 }
@@ -350,7 +346,7 @@ fun DreamDetailScreen(
                 displayedDream == null -> item {
                     DreamReviewCard("Dream unavailable") {
                         SupportingDreamText(
-                            "This dream is not present in the normal local log.",
+                            "Dream not found.",
                         )
                     }
                 }
@@ -400,7 +396,7 @@ fun DreamDetailScreen(
                                 ) { error ->
                                     if (error == null) {
                                         editing = false
-                                        actionMessage = "Dream edit saved locally."
+                                        actionMessage = "Saved."
                                     } else {
                                         actionMessage = error
                                     }
@@ -429,15 +425,13 @@ fun DreamDetailScreen(
                     item {
                         DreamReviewCard("Delete dream") {
                             SupportingDreamText(
-                                "Deleting this processed dream hides it from the normal log and " +
-                                    "dream playback. It does not rewrite or delete session audio.",
+                                "Recordings remain.",
                             )
-                            Button(
+                            OutlinedButton(
                                 onClick = { deleteConfirmationVisible = true },
                                 enabled = !mutationBlocked,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.error,
-                                    contentColor = MaterialTheme.colorScheme.onError,
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error,
                                 ),
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
@@ -451,7 +445,7 @@ fun DreamDetailScreen(
                 item {
                     SupportingDreamText(
                         text = message,
-                        warning = message != "Dream edit saved locally." &&
+                        warning = message != "Saved." &&
                             message != "Dream restored.",
                     )
                 }
@@ -464,7 +458,7 @@ fun DreamDetailScreen(
             onDismissRequest = { discardChangesConfirmationVisible = false },
             title = { Text("Discard changes?") },
             text = {
-                Text("Your unsaved title or dream text changes will be lost.")
+                Text("Unsaved changes will be lost.")
             },
             confirmButton = {
                 TextButton(
@@ -474,7 +468,7 @@ fun DreamDetailScreen(
                         onBack()
                     },
                 ) {
-                    Text("Discard and leave")
+                    Text("Discard")
                 }
             },
             dismissButton = {
@@ -488,12 +482,11 @@ fun DreamDetailScreen(
     if (deleteConfirmationVisible && displayedDream != null) {
         AlertDialog(
             onDismissRequest = { deleteConfirmationVisible = false },
-            title = { Text("Delete this dream?") },
+            title = { Text("Delete dream?") },
             text = {
                 Text(
-                    "The dream will disappear from the normal log and dream playback. " +
-                        "Underlying session audio remains until its normal expiry or until all " +
-                        "raw audio for this night is deleted. You can undo immediately.",
+                    "Hide this dream from History and playback. Recordings remain. " +
+                        "Undo is available immediately after deletion.",
                 )
             },
             confirmButton = {
@@ -543,7 +536,7 @@ private fun DreamEditCard(
     onCancelEditing: () -> Unit,
     onSave: () -> Unit,
 ) {
-    DreamReviewCard(if (editing) "Edit dream" else "Dream") {
+    DreamReviewCard(if (editing) "Edit dream" else null) {
         if (editing) {
             OutlinedTextField(
                 value = titleDraft,
@@ -560,7 +553,7 @@ private fun DreamEditCard(
                 enabled = !mutationBlocked,
                 isError = bodyDraft.isBlank(),
                 supportingText = if (bodyDraft.isBlank()) {
-                    { Text("Dream text cannot be blank.") }
+                    { Text("Enter dream text.") }
                 } else {
                     null
                 },
@@ -598,7 +591,6 @@ private fun DreamEditCard(
                         ?: "Untitled dream",
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
                 )
                 if (dream.dream.ownerEdited) {
                     Text(
@@ -615,30 +607,26 @@ private fun DreamEditCard(
                 SupportingDreamText("Narrated ${narrationDateTimes.joinToString()}")
             }
             Text(dream.dream.currentText, style = MaterialTheme.typography.bodyLarge)
-            dream.dream.editedAtEpochMillis?.let {
-                SupportingDreamText("Owner edit saved locally.")
-            }
             Button(
                 onClick = onStartEditing,
                 enabled = !mutationBlocked,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Edit title and text")
+                Text("Edit dream")
             }
             if (dream.dream.ownerEdited) {
                 OutlinedButton(
                     onClick = onToggleGenerated,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(if (generatedExpanded) "Hide generated version" else "Show generated version")
+                    Text(if (generatedExpanded) "Hide generated text" else "Show generated text")
                 }
                 if (generatedExpanded) {
                     HorizontalDivider()
                     Text(
                         text = dream.dream.generatedTitle?.takeIf(String::isNotBlank)
-                            ?: "Generated untitled dream",
+                            ?: "Untitled dream",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
                     )
                     Text(
                         text = dream.dream.generatedText,
@@ -646,7 +634,7 @@ private fun DreamEditCard(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     SupportingDreamText(
-                        "This generated baseline is preserved and will not silently replace your edit.",
+                        "Generated original.",
                     )
                 }
             }
@@ -677,9 +665,9 @@ private fun DreamSourceCard(
     DreamReviewCard("Source") {
         SupportingDreamText(
             if (dream.sourceSpans.size == 1) {
-                "1 source range links this dream to its retained raw transcript."
+                "1 source range"
             } else {
-                "${dream.sourceSpans.size} source ranges play in their recorded logical order."
+                "${dream.sourceSpans.size} source ranges"
             },
         )
         Button(
@@ -691,12 +679,12 @@ private fun DreamSourceCard(
         }
         if (captureActive) {
             SupportingDreamText(
-                "Playback is disabled while a night is actively listening.",
+                "End listening to play audio.",
                 warning = true,
             )
         } else if (blocked) {
             SupportingDreamText(
-                "Playback is disabled while local processing or an archive change is active.",
+                "Playback unavailable during processing or an archive change.",
                 warning = true,
             )
         } else if (availabilityMessage != null) {
@@ -736,7 +724,6 @@ private fun DreamSourceCard(
                         capturedAt?.let { "$it · " }.orEmpty() +
                         "${sourceRangeText(span.sourceStartMillis, span.sourceEndMillis)}",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
                 )
                 SupportingDreamText(sourceRoleText(span.role))
                 Text(span.sourceText, style = MaterialTheme.typography.bodyMedium)
@@ -752,9 +739,9 @@ internal fun dreamPlaybackButtonText(
     if (state.dreamId != dreamId) return "Play source audio"
     return when (state.phase) {
         DreamSourcePlaybackPhase.PREPARING -> "Cancel playback"
-        DreamSourcePlaybackPhase.PLAYING -> "Pause source audio"
-        DreamSourcePlaybackPhase.PAUSED -> "Resume source audio"
-        DreamSourcePlaybackPhase.COMPLETED -> "Play source audio again"
+        DreamSourcePlaybackPhase.PLAYING -> "Pause"
+        DreamSourcePlaybackPhase.PAUSED -> "Resume"
+        DreamSourcePlaybackPhase.COMPLETED -> "Play again"
         else -> "Play source audio"
     }
 }
@@ -825,26 +812,26 @@ internal fun reprocessNightDataUnavailableReason(
     requiresRetainedAudio: Boolean = true,
 ): String? {
     if (record.hasProtectedDreamChanges) {
-        return "Reprocessing is disabled because an owner edit or deletion must not be overwritten."
+        return "Your edits or deletions prevent reprocessing."
     }
     if (record.sessions.isEmpty()) {
-        return "This night has no recorded wakeword sessions to reprocess."
+        return "No sessions to reprocess."
     }
     if (record.night.captureState !in setOf(
             NightCaptureState.ENDED,
             NightCaptureState.INTERRUPTED,
         )
     ) {
-        return "End this night before reprocessing it."
+        return "End this night before reprocessing."
     }
     if (
         requiresRetainedAudio &&
         record.sessions.any { it.audioState != AudioEvidenceState.RETAINED }
     ) {
-        return "Every wakeword session needs retained raw audio for reprocessing."
+        return "Reprocessing needs raw audio for every session."
     }
     if (record.sessions.any { it.finalizedAtEpochMillis == null }) {
-        return "Every wakeword session must finish recovery before reprocessing."
+        return "Finish session recovery before reprocessing."
     }
     val completeSessionIds = record.transcripts
         .filter { it.transcript.state == ProcessingState.COMPLETE }
@@ -853,7 +840,7 @@ internal fun reprocessNightDataUnavailableReason(
         completeSessionIds.size != record.sessions.size ||
         completeSessionIds.toSet() != record.sessions.map { it.sessionId }.toSet()
     ) {
-        return "Every wakeword session needs one completed transcript before reprocessing."
+        return "Reprocessing needs one completed transcript per session."
     }
     return null
 }
@@ -880,15 +867,12 @@ fun ManageNightDataCard(
         requiresRetainedAudio = reprocessRequiresTranscription,
     )
     val effectiveGlobalReason = reprocessUnavailableReason ?: if (blocked) {
-        "Wait for the current capture, local processing, or archive operation to finish."
+        "Wait for capture, processing, or the archive change to finish."
     } else {
         null
     }
 
-    DreamReviewCard("Manage night data") {
-        SupportingDreamText(
-            "Dream and transcript text stays in app-private history until you delete the whole night.",
-        )
+    DreamReviewCard("Manage night") {
         OutlinedButton(
             onClick = { confirmation = NightDeleteConfirmation.REPROCESS },
             enabled = dataUnavailableReason == null && effectiveGlobalReason == null &&
@@ -898,15 +882,15 @@ fun ManageNightDataCard(
             Text(
                 if (reprocessRunning) {
                     if (reprocessRequiresTranscription) {
-                        "Reprocessing this night…"
+                        "Reprocessing…"
                     } else {
-                        "Regrouping this night…"
+                        "Regrouping…"
                     }
                 } else {
                     if (reprocessRequiresTranscription) {
-                        "Reprocess with latest models"
+                        "Reprocess night"
                     } else {
-                        "Regroup with latest model"
+                        "Regroup dreams"
                     }
                 },
             )
@@ -927,23 +911,22 @@ fun ManageNightDataCard(
             enabled = retainedAudio && !blocked,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Delete recordings only")
+            Text("Delete recordings")
         }
         if (retainedAudio) {
-            SupportingDreamText("The night and dreams will remain in History.")
+            SupportingDreamText("Keeps dreams and transcripts.")
         } else {
-            SupportingDreamText("No retained raw audio remains for this night.")
+            SupportingDreamText("No recordings remain.")
         }
-        Button(
+        OutlinedButton(
             onClick = { confirmation = NightDeleteConfirmation.WHOLE_NIGHT },
             enabled = !blocked,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.error,
-                contentColor = MaterialTheme.colorScheme.onError,
+            colors = ButtonDefaults.outlinedButtonColors(
+                contentColor = MaterialTheme.colorScheme.error,
             ),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Delete night from History")
+            Text("Delete night")
         }
         actionMessage?.let { SupportingDreamText(it, warning = true) }
     }
@@ -956,34 +939,27 @@ fun ManageNightDataCard(
             title = {
                 Text(
                     when {
-                        reprocess && reprocessRequiresTranscription -> "Reprocess this night?"
-                        reprocess -> "Regroup this night?"
-                        rawAudioOnly -> "Delete recordings only?"
-                        else -> "Delete this night from History?"
+                        reprocess && reprocessRequiresTranscription -> "Reprocess night?"
+                        reprocess -> "Regroup dreams?"
+                        rawAudioOnly -> "Delete recordings?"
+                        else -> "Delete night?"
                     },
                 )
             },
             text = {
                 Text(
                     if (reprocess && reprocessRequiresTranscription) {
-                        "DreamLog will re-transcribe every retained wakeword session with the " +
-                            "current high-quality speech model, then replace this night's " +
-                            "generated dream grouping with the current enrichment model. Raw " +
-                            "audio remains. Existing generated text will be replaced and this " +
-                            "can't be undone."
+                        "Replace transcripts and generated dreams using current models. " +
+                            "Recordings remain. This can't be undone."
                     } else if (reprocess) {
-                        "This night's saved transcript already uses the current speech model. " +
-                            "DreamLog will keep that transcript and atomically replace only the " +
-                            "generated dream grouping with the latest enrichment model. Existing " +
-                            "generated dreams will be replaced and this can't be undone."
+                        "Replace generated dreams using the current model. Raw transcripts " +
+                            "remain. This can't be undone."
                     } else if (rawAudioOnly) {
-                        "All retained raw audio for this night will be permanently deleted. " +
-                            "The night, dreams, raw transcripts, and source text will remain in " +
-                            "History. This can't be undone."
+                        "Delete this night's recordings. Dreams, raw transcripts, and source " +
+                            "text remain. This can't be undone."
                     } else {
-                        "This permanently removes the selected History row and its dreams, " +
-                            "transcripts, capture diagnostics, and recordings. Other nights are " +
-                            "not affected. This can't be undone."
+                        "Delete this night and its dreams, transcripts, diagnostics, and " +
+                            "recordings. This can't be undone."
                     },
                 )
             },
@@ -994,15 +970,15 @@ fun ManageNightDataCard(
                         actionMessage = null
                         if (reprocess) {
                             actionMessage = if (reprocessRequiresTranscription) {
-                                "Reprocessing started. Keep DreamLog open."
+                                "Reprocessing. Keep DreamLog open."
                             } else {
-                                "Dream regrouping started. Keep DreamLog open."
+                                "Regrouping. Keep DreamLog open."
                             }
                             onReprocessNight()
                         } else {
                             val completion: (String?) -> Unit = { error ->
                                 actionMessage = error ?: if (rawAudioOnly) {
-                                    "Recordings deleted. The night and dreams remain in History."
+                                    "Recordings deleted."
                                 } else {
                                     null
                                 }
@@ -1040,7 +1016,7 @@ private enum class NightDeleteConfirmation {
 
 @Composable
 private fun DreamReviewCard(
-    title: String,
+    title: String?,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Card(
@@ -1050,15 +1026,16 @@ private fun DreamReviewCard(
         ),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
-                text = title,
-                modifier = Modifier.semantics { heading() },
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
+            if (title != null) {
+                Text(
+                    text = title,
+                    modifier = Modifier.semantics { heading() },
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
             content()
         }
     }

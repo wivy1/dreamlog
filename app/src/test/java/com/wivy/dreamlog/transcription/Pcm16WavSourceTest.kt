@@ -69,6 +69,45 @@ class Pcm16WavSourceTest {
         }
     }
 
+    @Test
+    fun completeWaveformPreservesSamplesAcrossReadChunksAndPartialTail() {
+        val pcmValues = shortArrayOf(
+            Short.MIN_VALUE, -32_767, -257, -256, -1, 0, 1, 255, 256, 32_766, Short.MAX_VALUE,
+        )
+        val samples = ShortArray(40_013) { pcmValues[it % pcmValues.size] }
+        val file = wav(samples)
+        val sourceBytes = file.readBytes()
+        val source = Pcm16WavSource.open(file)
+        val startSample = 3
+        val endSampleExclusive = samples.size - 5
+        val expected = FloatArray(endSampleExclusive - startSample) {
+            samples[startSample + it].toFloat() / 32_768f
+        }
+
+        val waveform = source.readCompleteFloatSamples(
+            recognitionRange = Pcm16WavSource.RecognitionRange(
+                startSample.toLong(),
+                endSampleExclusive.toLong(),
+            ),
+            maxSampleCount = expected.size,
+        )
+
+        assertArrayEquals(expected, waveform, 0f)
+        assertArrayEquals(sourceBytes, file.readBytes())
+    }
+
+    @Test
+    fun completeWaveformSupportsEmptyRecognitionRange() {
+        val source = Pcm16WavSource.open(wav(shortArrayOf(Short.MIN_VALUE, Short.MAX_VALUE)))
+
+        val waveform = source.readCompleteFloatSamples(
+            recognitionRange = Pcm16WavSource.RecognitionRange(2, 2),
+            maxSampleCount = 1,
+        )
+
+        assertEquals(0, waveform.size)
+    }
+
     private fun wav(samples: ShortArray): File =
         temporaryFolder.newFile("fixture-${samples.size}.wav").also { file ->
             RandomAccessFile(file, "rw").use { output ->

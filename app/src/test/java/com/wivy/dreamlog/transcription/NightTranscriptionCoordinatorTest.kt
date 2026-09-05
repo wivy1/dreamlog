@@ -932,6 +932,14 @@ class NightTranscriptionCoordinatorTest {
 
         override fun readHistory(): List<NightWithDetails> = listOfNotNull(readNight(night.nightId))
 
+        override fun readFinalizedNightIds(): List<String> =
+            listOf(night)
+                .filter {
+                    it.captureState == NightCaptureState.ENDED ||
+                        it.captureState == NightCaptureState.INTERRUPTED
+                }
+                .map(NightEntity::nightId)
+
         override fun readNight(nightId: String): NightWithDetails? =
             night.takeIf { it.nightId == nightId }?.let {
                 if (failNextRead) {

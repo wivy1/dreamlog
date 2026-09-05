@@ -127,7 +127,7 @@ class MainActivityReprocessStateTest {
             assertEquals("process-b", state.ownerProcessInstanceId)
             assertEquals(NightReprocessPhase.IDLE.name, state.phaseName)
             assertTrue(state.message.orEmpty().contains("interrupted"))
-            assertTrue(state.message.orEmpty().contains("retry"))
+            assertTrue(state.message.orEmpty().contains("try again"))
         }
     }
 
@@ -230,7 +230,7 @@ class MainActivityReprocessStateTest {
                 enrichmentModelPhase = EnrichmentModelPhase.INSTALLED,
                 enrichmentRuntimePhase = EnrichmentRuntimePhase.IDLE,
                 requiresTranscriptionModel = true,
-            ).orEmpty().contains("transcription model"),
+            ).orEmpty().contains("speech model"),
         )
     }
 
@@ -253,8 +253,8 @@ class MainActivityReprocessStateTest {
             enrichmentRuntimePhase = EnrichmentRuntimePhase.IDLE,
         )
 
-        assertTrue(running.orEmpty().contains("transcription is still running"))
-        assertTrue(checking.orEmpty().contains("still being checked"))
+        assertTrue(running.orEmpty().contains("Wait for transcription"))
+        assertTrue(checking.orEmpty().contains("Checking"))
         assertFalse(checking.orEmpty().contains("Install"))
     }
 }

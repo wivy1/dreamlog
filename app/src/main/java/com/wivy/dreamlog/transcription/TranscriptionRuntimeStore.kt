@@ -47,7 +47,7 @@ data class TranscriptionRuntimeSnapshot(
     val modelDownloadedBytes: Long = 0L,
     val modelTotalBytes: Long = SELECTED_MODEL_BYTES,
     val modelCurrentFile: String? = null,
-    val modelMessage: String = "Checking the local transcription model.",
+    val modelMessage: String = "Checking transcription model.",
     val modelError: String? = null,
     val transcriptionPhase: TranscriptionRuntimePhase = TranscriptionRuntimePhase.IDLE,
     val nightId: String? = null,
@@ -99,7 +99,7 @@ data class TranscriptionRuntimeSnapshot(
 
     val resumeActionLabel: String?
         get() = if (resumeAvailable) {
-            "Resume transcription — $completedSessionCount of $eligibleSessionCount complete"
+            "Resume transcription — $completedSessionCount/$eligibleSessionCount complete"
         } else {
             null
         }
@@ -128,7 +128,7 @@ object TranscriptionRuntimeStore {
     private val transcriptionStopDeferral =
         AtomicReference<TranscriptionContinuationDecision.Defer?>(null)
 
-    /** Initializes database recovery and model status exactly once in this app process. */
+    /** Recovers database state once per app process; model verification waits until needed. */
     fun initialize(context: Context): Boolean {
         val appContext = context.applicationContext
         synchronized(lock) {
@@ -137,8 +137,8 @@ object TranscriptionRuntimeStore {
             activeOperation = RuntimeOperation.INITIALIZE
             publishLocked(
                 mutableSnapshots.value.copy(
-                    modelPhase = TranscriptionModelPhase.VERIFYING,
-                    modelMessage = "Checking the local transcription model.",
+                    modelPhase = TranscriptionModelPhase.UNINITIALIZED,
+                    modelMessage = "Recovering transcription.",
                     modelError = null,
                     transcriptionError = null,
                 ),
@@ -160,7 +160,7 @@ object TranscriptionRuntimeStore {
             publishLocked(
                 mutableSnapshots.value.copy(
                     modelPhase = TranscriptionModelPhase.VERIFYING,
-                    modelMessage = "Verifying the installed local model.",
+                    modelMessage = "Verifying model.",
                     modelError = null,
                     modelCurrentFile = null,
                     modelDownloadedBytes = 0L,
@@ -182,7 +182,7 @@ object TranscriptionRuntimeStore {
             if (mutableSnapshots.value.modelPhase == TranscriptionModelPhase.INSTALLED) {
                 publishLocked(
                     mutableSnapshots.value.copy(
-                        modelMessage = "The local transcription model is already installed.",
+                        modelMessage = "Model already installed.",
                         modelError = null,
                     ),
                 )
@@ -197,7 +197,7 @@ object TranscriptionRuntimeStore {
                     modelPhase = TranscriptionModelPhase.INSTALLING,
                     modelDownloadedBytes = 0L,
                     modelCurrentFile = null,
-                    modelMessage = "Downloading the verified model into private local storage.",
+                    modelMessage = "Downloading model.",
                     modelError = null,
                 ),
             )
@@ -214,7 +214,7 @@ object TranscriptionRuntimeStore {
         publishLocked(
             mutableSnapshots.value.copy(
                 modelPhase = TranscriptionModelPhase.CANCELLING,
-                modelMessage = "Cancelling the model installation and cleaning partial files.",
+                modelMessage = "Cancelling download.",
             ),
         )
         true
@@ -230,7 +230,7 @@ object TranscriptionRuntimeStore {
             publishLocked(
                 mutableSnapshots.value.copy(
                     modelPhase = TranscriptionModelPhase.REMOVING,
-                    modelMessage = "Removing the local transcription model.",
+                    modelMessage = "Removing model.",
                     modelError = null,
                     modelCurrentFile = null,
                 ),
@@ -268,7 +268,6 @@ object TranscriptionRuntimeStore {
 
     private fun initializeOnThread(appContext: Context) {
         var recoveredAttempts = 0
-        var claimedGate = false
         try {
             val database = DreamLogDatabase.get(appContext)
             val runtime = RuntimeDependencies(
@@ -287,34 +286,20 @@ object TranscriptionRuntimeStore {
                 storedPause = runtime.pauseStore.read(),
             )
             if (resumable == null) runtime.pauseStore.clear()
-            claimedGate = CaptureTranscriptionOperationGate.tryClaimLocalOperation {
-                CaptureRuntimeStore.snapshots.value.active
-            }
-            val status = if (claimedGate) runtime.modelManager.status() else null
             synchronized(lock) {
                 dependencies = runtime
                 clearActiveOperationLocked()
                 val recoveredRevision = if (recoveredAttempts > 0) 1L else 0L
-                if (status == null) {
-                    installedModel = null
-                    publishLocked(
-                        mutableSnapshots.value.copy(
-                            initialized = true,
-                            modelPhase = TranscriptionModelPhase.VERIFICATION_DEFERRED,
-                            modelMessage =
-                                "Model verification will resume after capture or other local work.",
-                            modelError = null,
-                            historyRevision =
-                                mutableSnapshots.value.historyRevision + recoveredRevision,
-                        ),
-                    )
-                } else {
-                    publishModelStatusLocked(
-                        status = status,
+                installedModel = null
+                publishLocked(
+                    mutableSnapshots.value.copy(
                         initialized = true,
-                        historyRevisionIncrement = recoveredRevision,
-                    )
-                }
+                        modelPhase = TranscriptionModelPhase.VERIFICATION_DEFERRED,
+                        modelMessage = "Model check deferred until needed.",
+                        modelError = null,
+                        historyRevision = mutableSnapshots.value.historyRevision + recoveredRevision,
+                    ),
+                )
                 if (resumable != null) {
                     publishLocked(
                         mutableSnapshots.value
@@ -336,18 +321,16 @@ object TranscriptionRuntimeStore {
                     mutableSnapshots.value.copy(
                         initialized = false,
                         modelPhase = TranscriptionModelPhase.ERROR,
-                        modelMessage = "Local transcription could not be initialized.",
+                        modelMessage = "Transcription setup failed.",
                         modelError = safeModelFailure(failure),
                         transcriptionPhase = TranscriptionRuntimePhase.ERROR,
                         transcriptionError =
-                            "Interrupted transcription recovery could not be completed.",
+                            "Transcription recovery failed. Restart DreamLog.",
                         historyRevision = mutableSnapshots.value.historyRevision +
                             if (recoveredAttempts > 0) 1L else 0L,
                     ),
                 )
             }
-        } finally {
-            if (claimedGate) CaptureTranscriptionOperationGate.releaseLocalOperation()
         }
     }
 
@@ -389,7 +372,7 @@ object TranscriptionRuntimeStore {
                         modelPhase = TranscriptionModelPhase.INSTALLED,
                         modelDownloadedBytes = model.totalModelBytes,
                         modelCurrentFile = null,
-                        modelMessage = "The verified local transcription model is installed.",
+                        modelMessage = "Model installed and verified.",
                         modelError = null,
                     ),
                 )
@@ -407,7 +390,7 @@ object TranscriptionRuntimeStore {
                     publishModelStatusLocked(
                         status = status,
                         messageOverride = if (cancelled) {
-                            "Model installation was cancelled; partial files were removed."
+                            "Download cancelled."
                         } else {
                             null
                         },
@@ -420,9 +403,9 @@ object TranscriptionRuntimeStore {
                             modelPhase = TranscriptionModelPhase.ERROR,
                             modelCurrentFile = null,
                             modelMessage = if (cancelled) {
-                                "Model installation was cancelled."
+                                "Download cancelled."
                             } else {
-                                "The local model could not be installed."
+                                "Model installation failed."
                             },
                             modelError = if (cancelled) null else safeModelFailure(failure),
                         ),
@@ -444,7 +427,7 @@ object TranscriptionRuntimeStore {
                         modelPhase = TranscriptionModelPhase.NOT_INSTALLED,
                         modelDownloadedBytes = 0L,
                         modelCurrentFile = null,
-                        modelMessage = "The local transcription model is not installed.",
+                        modelMessage = "Model not installed.",
                         modelError = null,
                     ),
                 )
@@ -457,7 +440,7 @@ object TranscriptionRuntimeStore {
                 if (status != null) {
                     publishModelStatusLocked(
                         status = status,
-                        messageOverride = "The local model could not be removed completely.",
+                        messageOverride = "Model removal incomplete. Try again.",
                         errorOverride = safeModelFailure(failure),
                     )
                 } else {
@@ -466,7 +449,7 @@ object TranscriptionRuntimeStore {
                         mutableSnapshots.value.copy(
                             modelPhase = TranscriptionModelPhase.ERROR,
                             modelCurrentFile = null,
-                            modelMessage = "The local model could not be removed.",
+                            modelMessage = "Model removal failed.",
                             modelError = safeModelFailure(failure),
                         ),
                     )
@@ -521,7 +504,7 @@ object TranscriptionRuntimeStore {
                         transcriptionPhase = TranscriptionRuntimePhase.ERROR,
                         nightId = request.nightId,
                         transcriptionError =
-                            "Install the local transcription model before transcribing.",
+                            "Install the transcription model first.",
                     ),
                 )
                 return false
@@ -534,7 +517,7 @@ object TranscriptionRuntimeStore {
                         mutableSnapshots.value.modelPhase
                     },
                     modelMessage = if (verifyDeferred) {
-                        "Verifying the installed local model."
+                        "Verifying model."
                     } else {
                         mutableSnapshots.value.modelMessage
                     },
@@ -558,7 +541,7 @@ object TranscriptionRuntimeStore {
                         transcriptionPhase = TranscriptionRuntimePhase.ERROR,
                         nightId = request.nightId,
                         transcriptionError =
-                            "Raw audio is being updated. Try transcription again in a moment.",
+                            "Audio is being updated. Try again shortly.",
                     ),
                 )
             }
@@ -574,8 +557,7 @@ object TranscriptionRuntimeStore {
                     mutableSnapshots.value.copy(
                         transcriptionPhase = TranscriptionRuntimePhase.ERROR,
                         transcriptionError =
-                            "The user-visible transcription service could not be started. " +
-                                "Retained audio remains available to resume.",
+                            "Transcription service could not start. Try again.",
                     ),
                 )
             }
@@ -616,7 +598,7 @@ object TranscriptionRuntimeStore {
                                     modelPhase = TranscriptionModelPhase.INSTALLED,
                                     modelDownloadedBytes = status.model.totalModelBytes,
                                     modelMessage =
-                                        "The verified local transcription model is installed.",
+                                        "Model installed and verified.",
                                     modelError = null,
                                 ),
                             )
@@ -751,7 +733,7 @@ object TranscriptionRuntimeStore {
                         nightId = request.nightId,
                         reason = TranscriptionPauseReason.PROCESS_INTERRUPTED,
                         message =
-                            "Transcription stopped. Retained audio remains available to resume.",
+                            "Transcription stopped. Resume when ready.",
                     )
                 }
                 val current = recoveredProgress
@@ -782,25 +764,22 @@ object TranscriptionRuntimeStore {
                             null
                         },
                         pauseMessage = if (canResume) {
-                            "Transcription stopped. Retained audio remains available to resume."
+                            "Transcription stopped. Resume when ready."
                         } else {
                             null
                         },
                         transcriptionError = when {
                             modelUnavailable ->
-                                "Install the local transcription model before transcribing."
+                                "Install the transcription model first."
 
                             request.replacesCompletedTranscripts && replacementCommitted ->
-                                "Re-transcription completed, but its final status refresh failed. " +
-                                    "Review the saved transcript; retained audio was kept."
+                                "Transcript replaced; status refresh failed. Review the transcript."
 
                             request.replacesCompletedTranscripts ->
-                                "Re-transcription stopped before replacement. The existing " +
-                                    "transcript and retained audio were kept."
+                                "Re-transcription stopped. Original transcript kept."
 
                             else ->
-                                "Local transcription stopped. Retained audio remains available " +
-                                    "to resume."
+                                "Transcription stopped. Resume when ready."
                         },
                         historyRevision = mutableSnapshots.value.historyRevision +
                             if (recoveredAttempts > 0) 1L else 0L,
@@ -824,7 +803,7 @@ object TranscriptionRuntimeStore {
                     },
                     modelDownloadedBytes = progress.completedBytes,
                     modelCurrentFile = progress.currentFile,
-                    modelMessage = "Downloading and verifying the local model.",
+                    modelMessage = "Downloading and verifying model.",
                 ),
             )
         }
@@ -853,7 +832,7 @@ object TranscriptionRuntimeStore {
             clearActiveOperationLocked()
             val hasFailure = progress.failedSessionCount > 0 || progress.unavailableSessionCount > 0
             val failureMessage = if (hasFailure) {
-                "Some retained sessions need review or retry."
+                "Review or retry unfinished recordings."
             } else {
                 null
             }
@@ -960,7 +939,7 @@ object TranscriptionRuntimeStore {
     ): Boolean {
         return when {
             activeOperation != null -> {
-                val message = "Wait for the current local operation to finish."
+                val message = "Wait for the current task to finish."
                 publishLocked(
                     if (modelOperation) {
                         mutableSnapshots.value.copy(modelError = message)
@@ -974,7 +953,7 @@ object TranscriptionRuntimeStore {
             !CaptureTranscriptionOperationGate.tryClaimLocalOperation {
                 CaptureRuntimeStore.snapshots.value.active
             } -> {
-                val message = "End night capture before running local model operations."
+                val message = "End the night before processing."
                 publishLocked(
                     if (modelOperation) {
                         mutableSnapshots.value.copy(modelError = message)
@@ -1006,9 +985,9 @@ object TranscriptionRuntimeStore {
     private fun requireDependenciesLocked(modelOperation: Boolean): RuntimeDependencies? {
         dependencies?.let { return it }
         val message = if (initializationStarted) {
-            "Local transcription is still preparing."
+            "Transcription is still preparing."
         } else {
-            "Initialize local transcription before using it."
+            "Restart DreamLog to prepare transcription."
         }
         publishLocked(
             if (modelOperation) {
@@ -1041,7 +1020,7 @@ object TranscriptionRuntimeStore {
                         modelDownloadedBytes = 0L,
                         modelCurrentFile = null,
                         modelMessage = messageOverride
-                            ?: "The local transcription model is not installed.",
+                            ?: "Model not installed.",
                         modelError = errorOverride,
                         historyRevision = current.historyRevision + historyRevisionIncrement,
                     ),
@@ -1057,7 +1036,7 @@ object TranscriptionRuntimeStore {
                         modelDownloadedBytes = status.model.totalModelBytes,
                         modelCurrentFile = null,
                         modelMessage = messageOverride
-                            ?: "The verified local transcription model is installed.",
+                            ?: "Model installed and verified.",
                         modelError = errorOverride,
                         historyRevision = current.historyRevision + historyRevisionIncrement,
                     ),
@@ -1073,7 +1052,7 @@ object TranscriptionRuntimeStore {
                         modelDownloadedBytes = 0L,
                         modelCurrentFile = null,
                         modelMessage = messageOverride
-                            ?: "The local model is incomplete or does not match its manifest.",
+                            ?: "Model incomplete or invalid. Reinstall it.",
                         modelError = errorOverride ?: status.reason,
                         historyRevision = current.historyRevision + historyRevisionIncrement,
                     ),
@@ -1125,7 +1104,7 @@ object TranscriptionRuntimeStore {
                     modelPhase = TranscriptionModelPhase.ERROR,
                     modelError = safeModelFailure(failure),
                     transcriptionPhase = TranscriptionRuntimePhase.ERROR,
-                    transcriptionError = "The local operation could not be started.",
+                    transcriptionError = "Task could not start. Restart DreamLog.",
                 ),
             )
         }
@@ -1142,7 +1121,7 @@ object TranscriptionRuntimeStore {
             ?.replace(Regex("[\\r\\n]+"), " ")
             ?.take(MAX_ERROR_DETAIL_LENGTH)
         return if (detail.isNullOrBlank()) {
-            "${failure.javaClass.simpleName}: local model operation failed."
+            "${failure.javaClass.simpleName}: model operation failed."
         } else {
             "${failure.javaClass.simpleName}: $detail"
         }
@@ -1188,9 +1167,9 @@ object TranscriptionRuntimeStore {
             TranscriptionPauseReason.SESSION_FAILURE
         }
         val message = if (reason == TranscriptionPauseReason.PROCESS_INTERRUPTED) {
-            "Transcription stopped before completion. Retained audio remains available to resume."
+            "Transcription stopped. Resume when ready."
         } else {
-            "A retained session needs another transcription attempt."
+            "Retry the failed recording."
         }
         return ResumableProgress(source.toRuntimeProgress(), reason, message)
     }
@@ -1279,11 +1258,9 @@ object TranscriptionRuntimeStore {
     private const val AUDIO_DIRECTORY = "capture/audio"
     private const val MAX_ERROR_DETAIL_LENGTH = 240
     private const val FOREGROUND_TIMEOUT_MESSAGE =
-        "Android's foreground media-processing time limit was reached. " +
-            "Retained audio remains available to resume."
+        "Android's processing time limit was reached. Resume transcription."
     private const val FOREGROUND_SERVICE_LOST_MESSAGE =
-        "Android stopped the user-visible transcription service. The current session will " +
-            "finish if possible, then retained audio remains available to resume."
+        "Android stopped transcription. Finishing this recording if possible; resume afterward."
 }
 
 internal fun TranscriptionRuntimeSnapshot.withProgress(
@@ -1312,4 +1289,4 @@ private const val SELECTED_MODEL_BYTES = 663_043_117L
 private const val MODEL_SIZE_MIB = 632.327
 private const val MODEL_SIZE_LABEL = "632.327 MiB"
 private const val APP_OPEN_MESSAGE =
-    "Local transcription continues as finite foreground media processing; retained audio remains retryable."
+    "You can switch apps or lock the phone."

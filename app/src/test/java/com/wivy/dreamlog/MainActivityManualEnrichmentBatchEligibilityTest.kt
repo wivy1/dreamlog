@@ -35,11 +35,6 @@ class MainActivityManualEnrichmentBatchEligibilityTest {
     }
 
     @Test
-    fun primaryActionIsAtLeastTwiceThePriorHeight() {
-        assertTrue(HOME_PRIMARY_ACTION_HEIGHT_DP >= 152)
-    }
-
-    @Test
     fun pendingEnrichmentOffersStartNightInsteadOnlyWhenStartingIsActuallySafe() {
         val enrich = HomeMorningAction(
             kind = HomeNextActionKind.ENRICH,
@@ -72,7 +67,7 @@ class MainActivityManualEnrichmentBatchEligibilityTest {
             readyEnrichmentRecords = listOf(ready),
         )
         assertEquals("Stopping enrichment", stopping?.title)
-        assertTrue(stopping?.body.orEmpty().contains("hidden"))
+        assertTrue(stopping?.body.orEmpty().contains("left"))
 
         val failed = record(
             enrichmentState = ProcessingState.FAILED,
@@ -140,7 +135,8 @@ class MainActivityManualEnrichmentBatchEligibilityTest {
         )
 
         assertEquals(HomeNextActionKind.RESUME_TRANSCRIPTION, action?.kind)
-        assertEquals("Transcription paused — 0 of 1 complete", action?.title)
+        assertEquals("Transcription paused", action?.title)
+        assertTrue(action?.body.orEmpty().contains("0 of 1"))
         assertEquals("session-1", action?.sessionId)
         assertEquals("Resume transcription", action?.buttonLabel)
     }
@@ -183,6 +179,20 @@ class MainActivityManualEnrichmentBatchEligibilityTest {
     }
 
     @Test
+    fun emptyNightDoesNotOfferUnnecessaryEnrichment() {
+        val empty = record(sessions = emptyList())
+        assertTrue(empty.hasGenuinelyEmptyEnrichmentSource())
+        assertNull(
+            homeMorningAction(
+                latestResult = empty,
+                transcriptionRuntime = TranscriptionRuntimeSnapshot(),
+                enrichmentRuntime = EnrichmentRuntimeSnapshot(),
+                readyEnrichmentRecords = listOf(empty),
+            ),
+        )
+    }
+
+    @Test
     fun primaryStatusDescribesStateInsteadOfRepeatingTheAction() {
         assertEquals(
             "Ready to start",
@@ -203,7 +213,7 @@ class MainActivityManualEnrichmentBatchEligibilityTest {
             ),
         )
         assertEquals(
-            "Listening for wakewords",
+            "Listening",
             homePrimaryStatusTitle(
                 runtime = CaptureRuntimeSnapshot(
                     capture = CaptureSnapshot(phase = CapturePhase.LISTENING),
@@ -294,10 +304,10 @@ class MainActivityManualEnrichmentBatchEligibilityTest {
             assertEquals("Enrich", action?.buttonLabel)
             assertTrue(
                 action?.body.orEmpty()
-                    .contains("previous enrichment path could not fit this night's transcript"),
+                    .contains("Transcript exceeded the earlier enrichment limit"),
             )
             assertFalse(action?.body.orEmpty().contains("this capture"))
-            assertTrue(action?.body.orEmpty().contains("choose Enrich to retry"))
+            assertTrue(action?.body.orEmpty().contains("Choose Enrich to retry"))
             assertFalse(action?.body.orEmpty().contains("budget.."))
             assertFalse(action?.body.orEmpty().contains("after an app update"))
             assertFalse(action?.body.orEmpty().contains("[code="))

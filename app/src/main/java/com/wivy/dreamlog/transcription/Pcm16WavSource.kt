@@ -49,16 +49,23 @@ class Pcm16WavSource private constructor(
         }
 
         val result = FloatArray(recognitionSampleCount.toInt())
-        forEachFloatChunk(
-            recognitionRange = RecognitionRange(
-                startSample = resolvedRange.startSample,
-                endSampleExclusive = resolvedRange.endSampleExclusive,
-            ),
-        ) { chunk ->
-            chunk.samples.copyInto(
-                result,
-                destinationOffset = (chunk.startSample - resolvedRange.startSample).toInt(),
+        RandomAccessFile(file, "r").use { input ->
+            input.seek(dataOffsetBytes + resolvedRange.startSample * BYTES_PER_SAMPLE)
+            val bytes = ByteArray(
+                minOf(result.size, DEFAULT_CHUNK_SAMPLE_COUNT) * BYTES_PER_SAMPLE,
             )
+            var position = 0
+            while (position < result.size) {
+                val count = minOf(DEFAULT_CHUNK_SAMPLE_COUNT, result.size - position)
+                input.readFully(bytes, 0, count * BYTES_PER_SAMPLE)
+                for (index in 0 until count) {
+                    val low = bytes[index * 2].toInt() and 0xff
+                    val high = bytes[index * 2 + 1].toInt()
+                    val pcm = ((high shl 8) or low).toShort()
+                    result[position + index] = pcm.toFloat() / PCM_SCALE
+                }
+                position += count
+            }
         }
         return result
     }

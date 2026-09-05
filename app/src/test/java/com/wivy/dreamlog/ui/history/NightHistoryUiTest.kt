@@ -19,6 +19,7 @@ import com.wivy.dreamlog.history.ProcessingState
 import com.wivy.dreamlog.history.RawAudioState
 import com.wivy.dreamlog.history.SessionTranscriptEntity
 import com.wivy.dreamlog.history.SessionTranscriptRecord
+import com.wivy.dreamlog.history.TranscriptSegmentEntity
 import com.wivy.dreamlog.playback.DreamSourcePlaybackPhase
 import com.wivy.dreamlog.playback.DreamSourcePlaybackState
 import java.nio.charset.StandardCharsets
@@ -33,8 +34,7 @@ class NightHistoryUiTest {
     @Test
     fun savedAudioInspectionTextDistinguishesCleanAndRecoverableArtifacts() {
         assertEquals(
-            "Saved audio check: all 4 recorded sessions have valid files. " +
-                "No additional finalized or partial audio was found.",
+            "All 4 recordings verified. No additional recordings or partial files.",
             nightAudioInspectionText(
                 NightAudioArtifactInspection(
                     directoryPresent = true,
@@ -65,14 +65,14 @@ class NightHistoryUiTest {
             ),
         )
 
-        assertTrue(candidate.contains("1 of 2 recorded sessions has a valid file"))
-        assertTrue(candidate.contains("1 additional finalized recording for this night"))
+        assertTrue(candidate.contains("1 of 2 recordings verified"))
+        assertTrue(candidate.contains("1 additional finalized recording"))
         assertTrue(candidate.contains("1 partial audio file"))
-        assertTrue(candidate.contains("1 finalized file could not be verified"))
-        assertTrue(candidate.contains("finalized recording is outside this night's time range"))
+        assertTrue(candidate.contains("1 additional finalized file unverified"))
+        assertTrue(candidate.contains("finalized recording outside this night's time range"))
         assertTrue(candidate.contains("1 metadata-only entry"))
         assertTrue(candidate.contains("1 unfinished metadata entry"))
-        assertTrue(candidate.endsWith("No files were changed."))
+        assertTrue(candidate.endsWith("1 unfinished metadata entry."))
     }
 
     @Test
@@ -114,12 +114,12 @@ class NightHistoryUiTest {
                 "[code=input_too_large; retryable=false]",
         )
 
-        assertTrue(text.contains("previous enrichment path could not fit this night's transcript"))
+        assertTrue(text.contains("Transcript exceeded the earlier enrichment limit"))
         assertFalse(text.contains("this capture"))
-        assertTrue(text.contains("context budget"))
+        assertTrue(text.contains("enrichment limit"))
         assertFalse(text.contains("after an app update"))
         assertFalse(text.contains("[code="))
-        assertTrue(text.contains("retry from this night"))
+        assertTrue(text.contains("retry available"))
     }
 
     @Test
@@ -131,12 +131,12 @@ class NightHistoryUiTest {
                 "[code=capture_input_too_large; retryable=false]",
         )
 
-        assertTrue(text.contains("previous enrichment path could not fit this night's transcript"))
+        assertTrue(text.contains("Transcript exceeded the earlier enrichment limit"))
         assertFalse(text.contains("this capture"))
-        assertTrue(text.contains("context budget"))
+        assertTrue(text.contains("enrichment limit"))
         assertFalse(text.contains("after an app update"))
         assertFalse(text.contains("[code="))
-        assertTrue(text.contains("retry from this night"))
+        assertTrue(text.contains("retry available"))
     }
 
     @Test
@@ -148,16 +148,16 @@ class NightHistoryUiTest {
         )
 
         assertTrue(text.contains("The ordered raw transcript source is invalid"))
-        assertFalse(text.contains("The raw transcript was preserved"))
+        assertFalse(text.contains("Raw transcript retained"))
         assertFalse(text.contains("[code="))
-        assertFalse(text.contains("retry from this night"))
+        assertFalse(text.contains("retry available"))
     }
 
     @Test
     fun terminalSourceFailuresDescribeSourceAvailabilityInEnrichmentSummary() {
         listOf(
-            "raw_source_unavailable" to "The raw transcript was not fully available",
-            "invalid_source" to "The ordered raw transcript source was invalid",
+            "raw_source_unavailable" to "Raw transcript incomplete or unavailable",
+            "invalid_source" to "Invalid raw transcript source",
         ).forEach { (code, expectedDetail) ->
             val text = enrichmentProcessingText(
                 ProcessingState.FAILED,
@@ -165,7 +165,7 @@ class NightHistoryUiTest {
             )
 
             assertTrue(text.contains(expectedDetail))
-            assertFalse(text.contains("The raw transcript was preserved"))
+            assertFalse(text.contains("Raw transcript retained"))
             assertFalse(text.contains("[code="))
         }
     }
@@ -176,31 +176,31 @@ class NightHistoryUiTest {
             "One capture exceeds this local model's context budget. " +
                 "[code=capture_input_too_large; retryable=false]",
         )
-        assertTrue(retryable.contains("choose Enrich to retry"))
+        assertTrue(retryable.contains("Retry with Enrich on Home"))
         assertFalse(retryable.contains("[code="))
 
         val terminal = enrichmentFailureWarningText(
             "The ordered raw transcript source is invalid. " +
                 "[code=invalid_source; retryable=false]",
         )
-        assertTrue(terminal.contains("cannot be retried from this night"))
-        assertFalse(terminal.contains("choose Enrich to retry"))
+        assertTrue(terminal.contains("This night can't be retried"))
+        assertFalse(terminal.contains("Retry with Enrich on Home"))
         assertFalse(terminal.contains("[code="))
     }
 
     @Test
     fun terminalSourceFailuresDoNotClaimCompletedTranscriptInNightDetail() {
         listOf(
-            "raw_source_unavailable" to "raw transcript was not fully available",
-            "invalid_source" to "ordered raw transcript source was invalid",
+            "raw_source_unavailable" to "raw transcript incomplete or unavailable",
+            "invalid_source" to "invalid raw transcript source",
         ).forEach { (code, expectedReason) ->
             val text = enrichmentFailureWarningText(
                 "A source check failed. [code=$code; retryable=false]",
             )
 
             assertTrue(text.contains(expectedReason))
-            assertTrue(text.contains("cannot be retried from this night"))
-            assertFalse(text.contains("completed raw transcript was preserved"))
+            assertTrue(text.contains("This night can't be retried"))
+            assertFalse(text.contains("Raw transcript retained"))
             assertFalse(text.contains("[code="))
         }
     }
@@ -213,8 +213,8 @@ class NightHistoryUiTest {
         )
 
         assertTrue(text.contains("Local enrichment was interrupted"))
-        assertTrue(text.contains("raw transcript was preserved"))
-        assertTrue(text.contains("retry from this night"))
+        assertTrue(text.contains("Raw transcript retained"))
+        assertTrue(text.contains("retry available"))
         assertFalse(text.contains("[code="))
     }
 
@@ -289,12 +289,12 @@ class NightHistoryUiTest {
             ),
         ).joinToString(" ")
 
-        assertTrue(diagnostics.contains("Android reported DreamLog's microphone input as silenced"))
+        assertTrue(diagnostics.contains("Android reported the microphone silenced"))
         assertTrue(diagnostics.contains("Stop other microphone recorders"))
-        assertTrue(diagnostics.contains("Completed session audio was preserved"))
+        assertTrue(diagnostics.contains("Completed audio retained"))
         assertFalse(diagnostics.contains("Recovery preserved"))
-        assertTrue(diagnostics.contains("last confirmed heartbeat"))
-        assertTrue(diagnostics.contains("may have continued afterward"))
+        assertTrue(diagnostics.contains("Last confirmed heartbeat"))
+        assertTrue(diagnostics.contains("Later listening is unconfirmed"))
         assertTrue(
             diagnostics.contains(
                 "from ${HistoryFormatters.dateTime(silencedAt, -5 * 60 * 60)} to " +
@@ -333,13 +333,13 @@ class NightHistoryUiTest {
         ).joinToString(" ")
 
         assertTrue(diagnostics.isNotBlank())
-        assertTrue(diagnostics.contains("protected storage reserve"))
-        assertTrue(diagnostics.contains("writing capture audio"))
-        assertTrue(diagnostics.contains("capture engine could not start"))
-        assertTrue(diagnostics.contains("reading microphone audio"))
-        assertTrue(diagnostics.contains("acknowledgement cue could not be played"))
-        assertTrue(diagnostics.contains("evidence could not be written reliably"))
-        assertTrue(diagnostics.contains("capture failed unexpectedly"))
+        assertTrue(diagnostics.contains("storage reserve reached"))
+        assertTrue(diagnostics.contains("audio write failed"))
+        assertTrue(diagnostics.contains("capture failed to start"))
+        assertTrue(diagnostics.contains("microphone read failed"))
+        assertTrue(diagnostics.contains("cue failed"))
+        assertTrue(diagnostics.contains("capture evidence write failed"))
+        assertTrue(diagnostics.contains("capture failed; check the end reason"))
     }
 
     @Test
@@ -384,10 +384,10 @@ class NightHistoryUiTest {
             NightOutcomeResumeAction(completedCount = 0, totalCount = 1),
             nightOutcomeResumeAction(failed),
         )
-        assertTrue(transcriptionProcessingText(failed).contains("retry from this night"))
+        assertTrue(transcriptionProcessingText(failed).contains("retry available"))
         assertTrue(
             transcriptionProcessingText(failed).contains(
-                "Retained source audio remains available",
+                "Source audio retained",
             ),
         )
         val unavailableText = transcriptionProcessingText(
@@ -398,11 +398,11 @@ class NightHistoryUiTest {
             ),
         )
         assertFalse(
-            unavailableText.contains("retry from this night"),
+            unavailableText.contains("retry available"),
         )
-        assertTrue(unavailableText.contains("retry cannot run"))
+        assertTrue(unavailableText.contains("can't retry"))
         assertEquals(
-            "Audio expired; saved transcript text remains",
+            "Audio expired; transcript retained",
             rawAudioText(
                 base.copy(
                     night = base.night.copy(rawAudioState = RawAudioState.UNAVAILABLE),
@@ -413,7 +413,7 @@ class NightHistoryUiTest {
             ),
         )
         assertEquals(
-            "Audio expired before transcription; no transcript was saved",
+            "Audio expired; no transcript",
             rawAudioText(
                 base.copy(
                     night = base.night.copy(rawAudioState = RawAudioState.UNAVAILABLE),
@@ -467,8 +467,8 @@ class NightHistoryUiTest {
 
         assertTrue(range.endsWith("no heartbeat confirmed"))
         assertFalse(range.contains(HistoryFormatters.time(recoveredAt, -5 * 60 * 60)))
-        assertTrue(diagnostics.contains("No heartbeat was recorded before recovery"))
-        assertTrue(diagnostics.contains("cannot confirm how long listening continued"))
+        assertTrue(diagnostics.contains("No heartbeat before recovery"))
+        assertTrue(diagnostics.contains("listening duration unconfirmed"))
     }
 
     @Test
@@ -507,7 +507,7 @@ class NightHistoryUiTest {
         )
 
         assertNull(dreamReviewStatusText(complete))
-        assertEquals("Some details uncertain", dreamReviewStatusText(uncertainDream))
+        assertEquals("Uncertain details", dreamReviewStatusText(uncertainDream))
         assertEquals("Fragment", dreamReviewStatusText(fragment))
         assertEquals("Uncertain fragment", dreamReviewStatusText(uncertainFragment))
     }
@@ -532,7 +532,7 @@ class NightHistoryUiTest {
             spanCount = 2,
         )
 
-        assertEquals("Pause source audio", dreamPlaybackButtonText(playing, "dream-1"))
+        assertEquals("Pause", dreamPlaybackButtonText(playing, "dream-1"))
         assertEquals("Play source audio", dreamPlaybackButtonText(playing, "dream-2"))
     }
 
@@ -568,7 +568,7 @@ class NightHistoryUiTest {
         assertTrue(
             reprocessNightDataUnavailableReason(
                 eligible.copy(hasProtectedDreamChanges = true),
-            ).orEmpty().contains("owner edit or deletion"),
+            ).orEmpty().contains("Your edits or deletions"),
         )
         assertFalse(
             canReprocessNight(
@@ -586,7 +586,7 @@ class NightHistoryUiTest {
                         it.copy(audioState = AudioEvidenceState.DELETED)
                     },
                 ),
-            ).orEmpty().contains("retained raw audio"),
+            ).orEmpty().contains("raw audio for every session"),
         )
         val currentTranscriptWithoutAudio = eligible.copy(
             sessions = eligible.sessions.map {
@@ -682,14 +682,13 @@ class NightHistoryUiTest {
         assertTrue(
             captureEvidence(affected)
                 .orEmpty()
-                .contains("did not finish cleanly"),
+                .contains("incomplete sessions: 1"),
         )
         assertTrue(
             captureEvidence(affected)
                 .orEmpty()
                 .contains(
-                    "an estimated 64 ms audio-clock discontinuity was observed during " +
-                        "an affected recollection",
+                    "estimated audio-clock discontinuity: 64 ms",
                 ),
         )
         assertEquals(
@@ -756,7 +755,7 @@ class NightHistoryUiTest {
         assertTrue(
             captureEvidence(affected)
                 .orEmpty()
-                .contains("microphone input as silenced"),
+                .contains("microphone silenced"),
         )
     }
 
@@ -775,7 +774,7 @@ class NightHistoryUiTest {
             assertTrue(
                 captureEvidence(affected)
                     .orEmpty()
-                    .contains("missing, corrupt, or unresolved source audio"),
+                    .contains("sessions with missing, corrupt, or unresolved audio: 1"),
             )
         }
     }
@@ -828,6 +827,161 @@ class NightHistoryUiTest {
         )
         assertTrue(hasUnreviewedCaptureIssue(changed))
         assertEquals("Complete · Capture issue", historyStatus(changed))
+    }
+
+    @Test
+    fun completedBlankTranscriptShowsNoSpeechInsteadOfReadyToEnrich() {
+        val blankTranscription = blankTranscriptionNight()
+
+        assertTrue(blankTranscription.hasNoRecognizedSpeech)
+        assertEquals("No speech recognized", historyStatus(blankTranscription))
+        assertEquals(
+            "No speech recognized",
+            enrichmentProcessingText(
+                state = blankTranscription.night.enrichmentState,
+                failure = blankTranscription.night.enrichmentFailure,
+                transcriptionState = blankTranscription.night.transcriptionState,
+                hasNoRecognizedSpeech = blankTranscription.hasNoRecognizedSpeech,
+            ),
+        )
+    }
+
+    @Test
+    fun noSpeechRequiresEverySessionToHaveEmptyRecognizedSource() {
+        val blank = blankTranscriptionNight()
+        val secondSession = blank.sessions.single().copy(
+            sessionId = "session-2",
+            captureOrder = 1,
+        )
+        val secondTranscript = blank.transcripts.single().copy(
+            transcript = blank.transcripts.single().transcript.copy(
+                sessionId = secondSession.sessionId,
+                rawText = "Recognized words",
+            ),
+        )
+        val mixed = blank.copy(
+            night = blank.night.copy(reportedSessionCount = 2),
+            sessions = blank.sessions + secondSession,
+            transcripts = blank.transcripts + secondTranscript,
+        )
+
+        assertFalse(mixed.hasNoRecognizedSpeech)
+        assertEquals("Ready to enrich", historyStatus(mixed))
+        val allBlank = mixed.copy(
+            transcripts = mixed.transcripts.map { saved ->
+                saved.copy(transcript = saved.transcript.copy(rawText = " \n\t"))
+            },
+        )
+        assertTrue(allBlank.hasNoRecognizedSpeech)
+        assertEquals("No speech recognized", historyStatus(allBlank))
+    }
+
+    @Test
+    fun noSpeechRejectsMissingDuplicateOrContradictorySourceEvidence() {
+        val blank = blankTranscriptionNight()
+        val saved = blank.transcripts.single()
+        val incompleteSources = listOf(
+            "missing transcript" to blank.copy(transcripts = emptyList()),
+            "duplicate transcript" to blank.copy(transcripts = listOf(saved, saved)),
+            "duplicate session" to blank.copy(sessions = blank.sessions + blank.sessions),
+            "unmatched session ID" to blank.copy(
+                transcripts = listOf(
+                    saved.copy(transcript = saved.transcript.copy(sessionId = "other-session")),
+                ),
+            ),
+            "missing raw text" to blank.copy(
+                transcripts = listOf(saved.copy(transcript = saved.transcript.copy(rawText = null))),
+            ),
+            "retained transcript segment" to blank.copy(
+                transcripts = listOf(
+                    saved.copy(
+                        segments = listOf(
+                            TranscriptSegmentEntity(
+                                sessionId = saved.transcript.sessionId,
+                                segmentIndex = 0,
+                                sourceStartMillis = 0L,
+                                sourceEndMillis = 1_000L,
+                                text = "Recognized words",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        incompleteSources.forEach { (description, record) ->
+            assertFalse(description, record.hasNoRecognizedSpeech)
+        }
+
+        val emptyNight = blank.copy(
+            night = blank.night.copy(reportedSessionCount = 0),
+            sessions = emptyList(),
+            transcripts = emptyList(),
+        )
+        assertFalse(emptyNight.hasNoRecognizedSpeech)
+        assertEquals("Ready to enrich", historyStatus(emptyNight))
+    }
+
+    @Test
+    fun noSpeechRequiresCompletedFailureFreeTranscription() {
+        val blank = blankTranscriptionNight()
+        val saved = blank.transcripts.single()
+        listOf(ProcessingState.NOT_STARTED, ProcessingState.RUNNING, ProcessingState.FAILED)
+            .forEach { state ->
+                assertFalse(
+                    "aggregate $state",
+                    blank.copy(night = blank.night.copy(transcriptionState = state))
+                        .hasNoRecognizedSpeech,
+                )
+                assertFalse(
+                    "session $state",
+                    blank.copy(
+                        transcripts = listOf(saved.copy(transcript = saved.transcript.copy(state = state))),
+                    ).hasNoRecognizedSpeech,
+                )
+            }
+        assertFalse(
+            blank.copy(night = blank.night.copy(transcriptionFailure = "Transcription failed."))
+                .hasNoRecognizedSpeech,
+        )
+        assertFalse(
+            blank.copy(
+                transcripts = listOf(
+                    saved.copy(transcript = saved.transcript.copy(failureDetail = "Session failed.")),
+                ),
+            ).hasNoRecognizedSpeech,
+        )
+    }
+
+    @Test
+    fun noSpeechDoesNotOverrideEnrichmentDreamOrCaptureIssuePriority() {
+        val blank = blankTranscriptionNight()
+        listOf(
+            ProcessingState.RUNNING to "Enriching",
+            ProcessingState.COMPLETE to "Complete",
+            ProcessingState.FAILED to "Enrichment failed",
+        ).forEach { (state, expected) ->
+            val record = blank.copy(night = blank.night.copy(enrichmentState = state))
+            assertEquals(expected, historyStatus(record))
+            assertFalse(
+                enrichmentProcessingText(
+                    state = state,
+                    failure = null,
+                    transcriptionState = record.night.transcriptionState,
+                    hasNoRecognizedSpeech = record.hasNoRecognizedSpeech,
+                ).contains("No speech recognized"),
+            )
+        }
+        assertEquals(
+            "Ready to enrich",
+            historyStatus(blank.copy(dreams = nightRecord().dreams)),
+        )
+        val captureIssue = blank.copy(night = blank.night.copy(interrupted = true))
+        assertEquals("Capture issue", historyStatus(captureIssue))
+        assertTrue(historyStatusIsError(captureIssue))
+        assertEquals(
+            "Transcription failed",
+            historyStatus(blank.copy(night = blank.night.copy(transcriptionState = ProcessingState.FAILED))),
+        )
     }
 
     @Test
@@ -1056,6 +1210,22 @@ class NightHistoryUiTest {
         cueEndSampleExclusive = 8_000L,
         automaticSilenceTailSampleCount = 160_000L,
     )
+
+    private fun blankTranscriptionNight(): NightRecord {
+        val base = nightRecord()
+        return base.copy(
+            night = base.night.copy(
+                enrichmentState = ProcessingState.WAITING_FOR_TRANSCRIPTION,
+            ),
+            transcripts = base.transcripts.map { saved ->
+                saved.copy(
+                    transcript = saved.transcript.copy(rawText = ""),
+                    segments = emptyList(),
+                )
+            },
+            dreams = emptyList(),
+        )
+    }
 
     private fun nightRecord(
         session: CaptureSessionEntity = session(),

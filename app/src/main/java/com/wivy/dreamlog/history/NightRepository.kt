@@ -149,14 +149,7 @@ class NightRepository(
             activeJournalNightId = active?.nightId,
         )
         transcriptionStateReconciler?.let { reconcileTranscriptionState ->
-            dao.readHistory()
-                .asSequence()
-                .map(NightWithDetails::night)
-                .filter { night ->
-                    night.captureState == NightCaptureState.ENDED ||
-                        night.captureState == NightCaptureState.INTERRUPTED
-                }
-                .forEach { night -> reconcileTranscriptionState(night.nightId) }
+            dao.readFinalizedNightIds().forEach(reconcileTranscriptionState)
         }
 
         val retention = rawAudioRetentionMillis()?.let(::expireRawAudio)

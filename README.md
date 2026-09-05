@@ -8,21 +8,23 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
-DreamLog is an open-source Android app designed to improve dream recall by allowing you to narrate your dreams without sitting up, looking at a screen, or typing. In the morning, all your spoken dreams are transcribed and organized.
+Record dreams without sitting up, looking at a screen, or typing. DreamLog transcribes your recordings on the phone and can organize them into separate dreams.
 
 ## How it works
 
-1. Before your first sleep, open DreamLog and complete the one-time model setup.
+1. Open **Settings** to download the speech model and optional enrichment model.
 
    **Stop every other microphone/listening app (e.g. SnoreLab) before starting a DreamLog night.**
 
-2. When you are ready to sleep, open DreamLog and tap **Start night**. The app checks microphone access and notification volume before it enters the waiting state.
-3. When you wake, say **"DreamLog"** or **"Hey DreamLog"**, wait for the cue, then speak naturally. You do not need to narrate your dream(s) in perfect chronological order: you can make reference to "the first dream," "the next dream," or "the dream after that" - whatever comes to your mind.
-4. When you are finished narrating, simply stop speaking and go back to sleep. DreamLog stops transcribing after 10 seconds of silence and returns to the waiting state.
-5. In the morning, tap **End Night**. DreamLog will complete transcription. Then tap **Enrich**, and DreamLog will organize your dream narration into distinct dreams.
-6. Open any completed night to review it. One or many dreams can be exported through Android's share/save surfaces as **TXT**, **JSON**, or **CSV**.
+2. Tap **Start night**. DreamLog checks microphone access and alert volume. A warning tells you when the wake alert may use connected audio, such as Bluetooth headphones; you can still start.
+3. When you wake, say **"DreamLog"** or **"Hey DreamLog"**, wait for the alert, then speak naturally. Narrate in any order, using phrases such as "the first dream" or "the next dream."
+4. Stop speaking and go back to sleep. Recording ends after 10 seconds of silence, and DreamLog returns to listening.
+5. In the morning, tap **End night**. Transcription runs on the phone, including with the screen off. Tap **Enrich** to organize the narration into dreams; keep DreamLog open until it finishes.
+6. Open a night to review its dreams and sources. Share or save selected nights as **TXT**, **JSON**, or **CSV**.
 
 ## Screenshots
+
+These screenshots use sample history and a generic dream.
 
 <table>
   <tr>
@@ -51,7 +53,7 @@ Dream audio, raw transcripts, and organized dreams stay in DreamLog's private lo
 
 ## Requirements
 
-Requires Android 12 or newer. First-time setup downloads an offline transcription model of about 75 MB and an optional enrichment model of about 2.66 GB.
+Requires Android 12 or newer on an arm64 device. One-time downloads are about 663 MB for transcription and 2.66 GB for optional enrichment.
 
 [Download the signed APK from the latest GitHub release.](https://github.com/wivy1/dreamlog/releases/latest)
 

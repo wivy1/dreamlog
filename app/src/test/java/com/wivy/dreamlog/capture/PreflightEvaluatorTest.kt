@@ -112,6 +112,39 @@ class PreflightEvaluatorTest {
     }
 
     @Test
+    fun `acknowledgement routed away from phone speaker warns without blocking start`() {
+        val evaluation = PreflightEvaluator.evaluate(
+            readyPreflightInput().copy(cueOutputMayBypassPhoneSpeaker = true),
+        )
+
+        assertTrue(evaluation.canStart)
+        assertTrue(evaluation.blockers.isEmpty())
+        assertEquals(
+            PreflightIssue(
+                code = PreflightIssueCode.CUE_OUTPUT_MAY_BYPASS_PHONE_SPEAKER,
+                severity = PreflightSeverity.WARNING,
+                remediation = PreflightRemediationCode.CHECK_CUE_OUTPUT,
+            ),
+            evaluation.warnings.single(),
+        )
+    }
+
+    @Test
+    fun `routing warning does not hide a muted cue blocker`() {
+        val evaluation = PreflightEvaluator.evaluate(
+            readyPreflightInput(cueVolumeReady = false)
+                .copy(cueOutputMayBypassPhoneSpeaker = true),
+        )
+
+        assertFalse(evaluation.canStart)
+        assertEquals(PreflightIssueCode.CUE_VOLUME_TOO_LOW, evaluation.blockers.single().code)
+        assertEquals(
+            PreflightIssueCode.CUE_OUTPUT_MAY_BYPASS_PHONE_SPEAKER,
+            evaluation.warnings.single().code,
+        )
+    }
+
+    @Test
     fun `starting checks can be explicitly deferred without hiding a failure`() {
         val evaluation =
             PreflightEvaluator.evaluate(

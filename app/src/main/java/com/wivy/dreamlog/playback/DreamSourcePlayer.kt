@@ -63,11 +63,11 @@ internal fun buildDreamSourcePlaybackPlan(
     }
     val ordered = sourceSpans.sortedBy(DreamSourceSpanEntity::spanOrder)
     if (ordered.map(DreamSourceSpanEntity::spanOrder) != ordered.indices.toList()) {
-        return DreamSourcePlaybackPlan.Unavailable("The source mapping is incomplete.")
+        return DreamSourcePlaybackPlan.Unavailable("Source mapping incomplete.")
     }
     val sessionsById = sessions.associateBy(CaptureSessionEntity::sessionId)
     if (sessionsById.size != sessions.size) {
-        return DreamSourcePlaybackPlan.Unavailable("The source mapping is ambiguous.")
+        return DreamSourcePlaybackPlan.Unavailable("Source mapping ambiguous.")
     }
 
     val clips = ArrayList<DreamSourcePlaybackClip>(ordered.size)
@@ -77,12 +77,12 @@ internal fun buildDreamSourcePlaybackPlan(
             span.sourceEndMillis <= span.sourceStartMillis ||
             span.sourceEndMillis > Int.MAX_VALUE.toLong()
         ) {
-            return DreamSourcePlaybackPlan.Unavailable("The source time range is invalid.")
+            return DreamSourcePlaybackPlan.Unavailable("Source time range invalid.")
         }
         val session = sessionsById[span.sessionId]
             ?: return DreamSourcePlaybackPlan.Unavailable("Source audio unavailable.")
         if (session.nightId != nightId) {
-            return DreamSourcePlaybackPlan.Unavailable("The source mapping belongs to another night.")
+            return DreamSourcePlaybackPlan.Unavailable("Source belongs to another night.")
         }
         sourceAudioUnavailableMessage(session.audioState)?.let { message ->
             return DreamSourcePlaybackPlan.Unavailable(message)
@@ -136,14 +136,14 @@ internal fun dreamSourcePlaybackStartMillis(
 internal fun sourceAudioUnavailableMessage(audioEvidenceState: String): String? =
     when (audioEvidenceState) {
         AudioEvidenceState.RETAINED -> null
-        AudioEvidenceState.EXPIRED -> "Audio expired. The source transcript is still available."
+        AudioEvidenceState.EXPIRED -> "Audio expired; source transcript retained."
         AudioEvidenceState.DELETED ->
-            "Raw audio was deleted for this night. The source transcript is still available."
+            "Audio deleted; source transcript retained."
 
         AudioEvidenceState.PENDING_RECOVERY ->
-            "Source audio needs recovery before it can be played."
+            "Source audio needs recovery."
 
-        AudioEvidenceState.CORRUPT -> "Source audio is corrupt and cannot be played."
+        AudioEvidenceState.CORRUPT -> "Source audio corrupt."
         AudioEvidenceState.MISSING -> "Source audio unavailable."
         else -> "Source audio unavailable."
     }
@@ -209,7 +209,7 @@ class DreamSourcePlayer(
                 DreamSourcePlaybackState(
                     phase = DreamSourcePlaybackPhase.RELEASED,
                     dreamId = dreamId,
-                    message = "Playback is no longer available on this screen.",
+                    message = "Playback unavailable on this screen.",
                 ),
             )
             return
@@ -220,7 +220,7 @@ class DreamSourcePlayer(
                 DreamSourcePlaybackState(
                     phase = DreamSourcePlaybackPhase.BLOCKED_BY_CAPTURE,
                     dreamId = dreamId,
-                    message = "Stop night listening before playing saved audio.",
+                    message = "End listening to play audio.",
                 ),
             )
             return
@@ -265,7 +265,7 @@ class DreamSourcePlayer(
             clearPlayback()
             publishUnavailable(
                 dreamId,
-                "Raw audio is being updated. Try playback again in a moment.",
+                "Audio is being updated. Try again shortly.",
             )
             return
         }
@@ -280,7 +280,7 @@ class DreamSourcePlayer(
         }.getOrElse {
             useLease.close()
             clearPlayback()
-            publishUnavailable(dreamId, "This source audio reference is invalid.")
+            publishUnavailable(dreamId, "Source audio reference invalid.")
             return
         }
         if (resolvedFiles.any { !it.isFile || !it.canRead() }) {
@@ -320,7 +320,7 @@ class DreamSourcePlayer(
         val expectedGeneration = generation
         val expectedIndex = currentSpanIndex
         val player = runCatching { MediaPlayer() }.getOrElse {
-            failCurrent("This source audio file could not be played.")
+            failCurrent("Source audio could not play.")
             return
         }
         try {
@@ -328,7 +328,7 @@ class DreamSourcePlayer(
             player.setDataSource(file.absolutePath)
         } catch (_: Exception) {
             safeRelease(player)
-            failCurrent("This source audio file could not be played.")
+            failCurrent("Source audio could not play.")
             return
         }
         mediaPlayer = player
@@ -336,7 +336,7 @@ class DreamSourcePlayer(
             if (!isCurrent(prepared, expectedGeneration, expectedIndex)) return@setOnPreparedListener
             val duration = prepared.duration.takeIf { it > 0 }?.toLong()
             if (duration != null && clip.sourceStartMillis >= duration) {
-                failCurrent("The source time range is outside the retained audio.")
+                failCurrent("Source range exceeds the recording.")
                 return@setOnPreparedListener
             }
             if (clip.sourceStartMillis == 0L) {
@@ -352,7 +352,7 @@ class DreamSourcePlayer(
                 runCatching {
                     prepared.seekTo(clip.sourceStartMillis, MediaPlayer.SEEK_CLOSEST)
                 }.onFailure {
-                    failCurrent("This source audio range could not be opened.")
+                    failCurrent("Source audio range could not open.")
                 }
             }
         }
@@ -365,7 +365,7 @@ class DreamSourcePlayer(
         }
         player.setOnErrorListener { failed, _, _ ->
             if (isCurrent(failed, expectedGeneration, expectedIndex)) {
-                failCurrent("This source audio file could not be played.")
+                failCurrent("Source audio could not play.")
             } else {
                 safeRelease(failed)
             }
@@ -380,7 +380,7 @@ class DreamSourcePlayer(
             ),
         )
         runCatching { player.prepareAsync() }.onFailure {
-            failCurrent("This source audio file could not be played.")
+            failCurrent("Source audio could not play.")
         }
     }
 
@@ -398,7 +398,7 @@ class DreamSourcePlayer(
             actualDurationMillis = duration,
         )
         if (effectiveEnd == null || effectiveEnd <= clip.sourceStartMillis) {
-            failCurrent("The source time range is outside the retained audio.")
+            failCurrent("Source range exceeds the recording.")
             return
         }
         try {
@@ -411,7 +411,7 @@ class DreamSourcePlayer(
                 sourceEndMillis = effectiveEnd,
             )
         } catch (_: IllegalStateException) {
-            failCurrent("This source audio file could not be played.")
+            failCurrent("Source audio could not play.")
         }
     }
 
@@ -422,7 +422,7 @@ class DreamSourcePlayer(
             player.pause()
             publishCurrent(DreamSourcePlaybackPhase.PAUSED)
         } catch (_: IllegalStateException) {
-            failCurrent("This source audio file could not be paused.")
+            failCurrent("Source audio could not pause.")
         }
     }
 
@@ -436,7 +436,7 @@ class DreamSourcePlayer(
             actualDurationMillis = duration,
         )
         if (effectiveEnd == null || effectiveEnd <= clip.sourceStartMillis) {
-            failCurrent("The source time range is outside the retained audio.")
+            failCurrent("Source range exceeds the recording.")
             return
         }
         try {
@@ -449,7 +449,7 @@ class DreamSourcePlayer(
                 sourceEndMillis = effectiveEnd,
             )
         } catch (_: IllegalStateException) {
-            failCurrent("This source audio file could not be resumed.")
+            failCurrent("Source audio could not resume.")
         }
     }
 
@@ -465,7 +465,7 @@ class DreamSourcePlayer(
                 if (!isCurrent(player, expectedGeneration, expectedIndex)) return
                 val currentPosition = runCatching { player.currentPosition.toLong() }
                     .getOrElse {
-                        failCurrent("This source audio range could not be read.")
+                        failCurrent("Source audio range could not be read.")
                         return
                     }
                 if (currentPosition + END_TOLERANCE_MILLIS >= sourceEndMillis) {

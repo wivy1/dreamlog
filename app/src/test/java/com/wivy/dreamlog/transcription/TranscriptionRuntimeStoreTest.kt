@@ -89,7 +89,7 @@ class TranscriptionRuntimeStoreTest {
 
         assertTrue(snapshot.resumeAvailable)
         assertEquals(
-            "Resume transcription — 7 of 8 complete",
+            "Resume transcription — 7/8 complete",
             snapshot.resumeActionLabel,
         )
         assertFalse(snapshot.busy)
@@ -102,7 +102,7 @@ class TranscriptionRuntimeStoreTest {
             TranscriptionNotification.progressText(completedCount = 7, eligibleCount = 8),
         )
         assertEquals(
-            "Preparing the verified local model",
+            "Preparing model…",
             TranscriptionNotification.progressText(completedCount = 0, eligibleCount = 0),
         )
     }

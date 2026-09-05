@@ -437,10 +437,6 @@ class AudioCaptureEngine(
                 continue
             }
 
-            for (index in pcmFrame.indices) {
-                floatFrame[index] = pcmFrame[index] / PCM16_SCALE
-            }
-
             val activeToken = activeSessionToken()
             if (activeToken != null) {
                 when (appendActiveFrame(activeToken, pcmFrame)) {
@@ -449,6 +445,9 @@ class AudioCaptureEngine(
                             vad.reset()
                             boundary.onCue()
                         } else {
+                            for (index in pcmFrame.indices) {
+                                floatFrame[index] = pcmFrame[index] / PCM16_SCALE
+                            }
                             val probability = vad.compute(floatFrame)
                             val narrativeComplete =
                                 if (probability >= VAD_THRESHOLD) {

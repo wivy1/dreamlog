@@ -17,7 +17,6 @@ import com.wivy.dreamlog.history.DreamLogDatabase
 import com.wivy.dreamlog.history.EnrichmentDao
 import com.wivy.dreamlog.history.ProcessingState
 import com.wivy.dreamlog.transcription.CaptureTranscriptionOperationGate
-import com.wivy.dreamlog.transcription.TranscriptionRuntimeStore
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -50,7 +49,7 @@ data class EnrichmentRuntimeSnapshot(
     val modelDownloadedBytes: Long = 0L,
     val modelTotalBytes: Long = EnrichmentModelManifest.MODEL_BYTES,
     val modelCurrentFile: String? = null,
-    val modelMessage: String = "Checking the local enrichment model.",
+    val modelMessage: String = "Checking enrichment model.",
     val modelError: String? = null,
     val runtimePhase: EnrichmentRuntimePhase = EnrichmentRuntimePhase.IDLE,
     val operation: EnrichmentOperationSnapshot = EnrichmentOperationSnapshot(),
@@ -124,8 +123,8 @@ object EnrichmentRuntimeStore {
             activeOperation = RuntimeOperation.INITIALIZE
             publishLocked(
                 mutableSnapshots.value.copy(
-                    modelPhase = EnrichmentModelPhase.VERIFYING,
-                    modelMessage = "Preparing local enrichment recovery.",
+                    modelPhase = EnrichmentModelPhase.UNINITIALIZED,
+                    modelMessage = "Recovering enrichment.",
                     modelError = null,
                     runtimeError = null,
                 ),
@@ -148,7 +147,7 @@ object EnrichmentRuntimeStore {
             publishLocked(
                 mutableSnapshots.value.copy(
                     modelPhase = EnrichmentModelPhase.VERIFYING,
-                    modelMessage = "Verifying the installed local enrichment model.",
+                    modelMessage = "Verifying model.",
                     modelError = null,
                     modelCurrentFile = null,
                     modelDownloadedBytes = 0L,
@@ -175,7 +174,7 @@ object EnrichmentRuntimeStore {
                     modelDownloadedBytes = 0L,
                     modelCurrentFile = null,
                     modelMessage =
-                        "Downloading the pinned enrichment model into private local storage.",
+                        "Downloading model.",
                     modelError = null,
                 ),
             )
@@ -192,7 +191,7 @@ object EnrichmentRuntimeStore {
         publishLocked(
             mutableSnapshots.value.copy(
                 modelPhase = EnrichmentModelPhase.CANCELLING,
-                modelMessage = "Cancelling the enrichment model download and cleaning partial data.",
+                modelMessage = "Cancelling download.",
             ),
         )
         true
@@ -205,7 +204,7 @@ object EnrichmentRuntimeStore {
             publishLocked(
                 mutableSnapshots.value.copy(
                     modelPhase = EnrichmentModelPhase.REMOVING,
-                    modelMessage = "Removing the local enrichment model.",
+                    modelMessage = "Removing model.",
                     modelError = null,
                 ),
             )
@@ -260,7 +259,7 @@ object EnrichmentRuntimeStore {
                         runtimePhase = EnrichmentRuntimePhase.ERROR,
                         runtimeMessage = null,
                         runtimeError =
-                            "Enrichment recovery needs DreamLog to restart before another batch.",
+                            "Restart DreamLog before enriching again.",
                     ),
                 )
                 return false
@@ -271,7 +270,7 @@ object EnrichmentRuntimeStore {
                         runtimePhase = EnrichmentRuntimePhase.ERROR,
                         runtimeMessage = null,
                         runtimeError =
-                            "Enrichment could not create its private recovery marker. Try again.",
+                            "Could not prepare enrichment recovery. Try again.",
                     ),
                 )
                 return false
@@ -312,7 +311,6 @@ object EnrichmentRuntimeStore {
 
     private fun initializeOnThread(appContext: Context) {
         var recovered = 0
-        var claimedGate = false
         try {
             val database = DreamLogDatabase.get(appContext)
             val nightDao = database.nightDao()
@@ -340,35 +338,19 @@ object EnrichmentRuntimeStore {
             check(runtime.interruptionJournal.clear()) {
                 "The private enrichment recovery marker could not be cleared."
             }
-            val canVerify = !CaptureRuntimeStore.snapshots.value.active &&
-                TranscriptionRuntimeStore.snapshots.value.initialized &&
-                !TranscriptionRuntimeStore.snapshots.value.busy
-            claimedGate = canVerify && CaptureTranscriptionOperationGate.tryClaimLocalOperation {
-                CaptureRuntimeStore.snapshots.value.active
-            }
-            val status = if (claimedGate) runtime.modelManager.status() else null
             synchronized(lock) {
                 dependencies = runtime
                 activeOperation = null
-                if (status == null) {
-                    installedModel = null
-                    publishLocked(
-                        mutableSnapshots.value.copy(
-                            initialized = true,
-                            modelPhase = EnrichmentModelPhase.VERIFICATION_DEFERRED,
-                            modelMessage =
-                                "Enrichment model verification will resume after other local work.",
-                            historyRevision =
-                                mutableSnapshots.value.historyRevision + if (recovered > 0) 1 else 0,
-                        ),
-                    )
-                } else {
-                    publishModelStatusLocked(
-                        status,
+                installedModel = null
+                publishLocked(
+                    mutableSnapshots.value.copy(
                         initialized = true,
-                        historyRevisionIncrement = if (recovered > 0) 1 else 0,
-                    )
-                }
+                        modelPhase = EnrichmentModelPhase.VERIFICATION_DEFERRED,
+                        modelMessage = "Model check deferred until needed.",
+                        historyRevision =
+                            mutableSnapshots.value.historyRevision + if (recovered > 0) 1 else 0,
+                    ),
+                )
                 if (reportRecoveredInterruption) {
                     publishLocked(
                         mutableSnapshots.value.copy(
@@ -389,17 +371,15 @@ object EnrichmentRuntimeStore {
                     mutableSnapshots.value.copy(
                         initialized = false,
                         modelPhase = EnrichmentModelPhase.ERROR,
-                        modelMessage = "Local enrichment could not be initialized.",
-                        modelError = "Private model or interrupted-run recovery failed.",
+                        modelMessage = "Enrichment setup failed.",
+                        modelError = "Model setup or recovery failed.",
                         runtimePhase = EnrichmentRuntimePhase.ERROR,
-                        runtimeError = "Local enrichment recovery needs attention.",
+                        runtimeError = "Enrichment recovery failed. Restart DreamLog.",
                         historyRevision =
                             mutableSnapshots.value.historyRevision + if (recovered > 0) 1 else 0,
                     ),
                 )
             }
-        } finally {
-            if (claimedGate) CaptureTranscriptionOperationGate.releaseLocalOperation()
         }
     }
 
@@ -415,7 +395,7 @@ object EnrichmentRuntimeStore {
                 publishModelStatusLocked(status)
             }
         } catch (_: Throwable) {
-            finishModelFailure(operation, "The enrichment model could not be verified.")
+            finishModelFailure(operation, "Model verification failed.")
         }
     }
 
@@ -439,7 +419,7 @@ object EnrichmentRuntimeStore {
                         modelPhase = EnrichmentModelPhase.INSTALLED,
                         modelDownloadedBytes = model.artifactBytes,
                         modelCurrentFile = null,
-                        modelMessage = "The verified local enrichment model is installed.",
+                        modelMessage = "Model installed and verified.",
                         modelError = null,
                     ),
                 )
@@ -455,7 +435,7 @@ object EnrichmentRuntimeStore {
                     publishModelStatusLocked(
                         status,
                         messageOverride = if (cancelled) {
-                            "Model installation was cancelled; partial data was removed."
+                            "Download cancelled."
                         } else {
                             null
                         },
@@ -467,9 +447,9 @@ object EnrichmentRuntimeStore {
                         mutableSnapshots.value.copy(
                             modelPhase = EnrichmentModelPhase.ERROR,
                             modelMessage = if (cancelled) {
-                                "Model installation was cancelled."
+                                "Download cancelled."
                             } else {
-                                "The local enrichment model could not be installed."
+                                "Model installation failed."
                             },
                             modelError = if (cancelled) null else "Model installation failed.",
                         ),
@@ -496,7 +476,7 @@ object EnrichmentRuntimeStore {
                     mutableSnapshots.value.copy(
                         modelPhase = EnrichmentModelPhase.NOT_INSTALLED,
                         modelDownloadedBytes = 0L,
-                        modelMessage = "The local enrichment model is not installed.",
+                        modelMessage = "Model not installed.",
                         modelError = null,
                     ),
                 )
@@ -504,7 +484,7 @@ object EnrichmentRuntimeStore {
         } catch (_: Throwable) {
             finishModelFailure(
                 RuntimeOperation.REMOVE_MODEL,
-                "The local enrichment model could not be removed.",
+                "Model removal failed.",
             )
         }
     }
@@ -534,14 +514,10 @@ object EnrichmentRuntimeStore {
                         runtimePhase = EnrichmentRuntimePhase.ERROR,
                         runtimeMessage = null,
                         runtimeError = if (recoveryCompleted) {
-                            "The enrichment batch stopped unexpectedly after " +
-                                "$processedNightCount of ${nightIds.size} nights. Unfinished " +
-                                "nights are ready to retry; existing raw transcripts were not " +
-                                "changed."
+                            "Enrichment stopped after $processedNightCount/${nightIds.size} nights. " +
+                                "Retry unfinished nights."
                         } else {
-                            "The enrichment batch stopped unexpectedly, and its private recovery " +
-                                "step could not finish. Restart DreamLog before retrying; existing " +
-                                "raw transcripts were not changed."
+                            "Enrichment recovery failed. Restart DreamLog before retrying."
                         },
                         batchUnstartedNightCount =
                             (nightIds.size - processedNightCount).coerceAtLeast(0),
@@ -655,9 +631,8 @@ object EnrichmentRuntimeStore {
                     runtimeError = if (successful) {
                         null
                     } else if (!journalCleared) {
-                        "Enrichment finished, but its private recovery marker could not be " +
-                            "cleared. Restart DreamLog before retrying; saved work and raw " +
-                            "transcripts were not changed."
+                        "Enrichment finished, but recovery cleanup failed. " +
+                            "Restart DreamLog before retrying."
                     } else {
                         batchFailureMessage(outcome, completedInterruptionCause)
                     },
@@ -781,7 +756,7 @@ object EnrichmentRuntimeStore {
                         modelPhase = EnrichmentModelPhase.NOT_INSTALLED,
                         modelDownloadedBytes = 0L,
                         modelCurrentFile = null,
-                        modelMessage = messageOverride ?: "The local enrichment model is not installed.",
+                        modelMessage = messageOverride ?: "Model not installed.",
                         modelError = errorOverride,
                         historyRevision =
                             mutableSnapshots.value.historyRevision + historyRevisionIncrement,
@@ -797,7 +772,7 @@ object EnrichmentRuntimeStore {
                         modelPhase = EnrichmentModelPhase.INSTALLED,
                         modelDownloadedBytes = status.model.artifactBytes,
                         modelCurrentFile = null,
-                        modelMessage = messageOverride ?: "The verified local enrichment model is installed.",
+                        modelMessage = messageOverride ?: "Model installed and verified.",
                         modelError = errorOverride,
                         historyRevision =
                             mutableSnapshots.value.historyRevision + historyRevisionIncrement,
@@ -813,7 +788,7 @@ object EnrichmentRuntimeStore {
                         modelPhase = EnrichmentModelPhase.INVALID,
                         modelDownloadedBytes = 0L,
                         modelCurrentFile = null,
-                        modelMessage = messageOverride ?: "The installed enrichment model is invalid.",
+                        modelMessage = messageOverride ?: "Model invalid. Reinstall it.",
                         modelError = errorOverride ?: status.reason,
                         historyRevision =
                             mutableSnapshots.value.historyRevision + historyRevisionIncrement,
@@ -835,43 +810,39 @@ object EnrichmentRuntimeStore {
         true
     } catch (_: Throwable) {
         synchronized(lock) {
-            if (activeOperation == RuntimeOperation.INITIALIZE) initializationStarted = false
+            val initializing = activeOperation == RuntimeOperation.INITIALIZE
+            if (initializing) initializationStarted = false
             if (modelOperationOwnsGate) releaseModelOperationLocked() else activeOperation = null
-            publishLocked(
-                mutableSnapshots.value.copy(
-                    runtimePhase = EnrichmentRuntimePhase.ERROR,
-                    runtimeError = "The finite local enrichment thread could not start.",
-                ),
-            )
+            publishLocked(mutableSnapshots.value.withThreadStartFailure(initializing))
         }
         false
     }
 
     private fun operationMessage(phase: EnrichmentOperationPhase): String = when (phase) {
         EnrichmentOperationPhase.IDLE -> APP_OPEN_MESSAGE
-        EnrichmentOperationPhase.PREPARING -> "Preparing the ordered raw transcript. $APP_OPEN_MESSAGE"
-        EnrichmentOperationPhase.LOADING_MODEL -> "Loading the local model. $APP_OPEN_MESSAGE"
-        EnrichmentOperationPhase.GENERATING -> "Creating the faithful reading version. $APP_OPEN_MESSAGE"
-        EnrichmentOperationPhase.VALIDATING -> "Checking every source link and generated word."
-        EnrichmentOperationPhase.SAVING -> "Saving the validated dream records atomically."
-        EnrichmentOperationPhase.COMPLETE -> "Local enrichment completed."
-        EnrichmentOperationPhase.FAILED -> "Local enrichment needs attention."
+        EnrichmentOperationPhase.PREPARING -> "Preparing transcript. $APP_OPEN_MESSAGE"
+        EnrichmentOperationPhase.LOADING_MODEL -> "Loading model. $APP_OPEN_MESSAGE"
+        EnrichmentOperationPhase.GENERATING -> "Organizing dreams. $APP_OPEN_MESSAGE"
+        EnrichmentOperationPhase.VALIDATING -> "Checking dreams against the transcript."
+        EnrichmentOperationPhase.SAVING -> "Saving dreams."
+        EnrichmentOperationPhase.COMPLETE -> "Enrichment complete."
+        EnrichmentOperationPhase.FAILED -> "Enrichment needs attention."
     }
 
     private fun interruptionRequestedMessage(cause: EnrichmentInterruptionCause): String =
         when (cause) {
             EnrichmentInterruptionCause.APP_HIDDEN ->
-                "Stopping local enrichment because DreamLog was hidden."
+                "Stopping enrichment: DreamLog was hidden."
 
             EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED ->
-                "Stopping local enrichment because the screen turned off or the phone locked."
+                "Stopping enrichment: screen off or phone locked."
 
             EnrichmentInterruptionCause.USER_CANCELLED ->
-                "Stopping local enrichment at your request."
+                "Cancelling enrichment."
         }
 
     private fun batchOperationMessage(progress: EnrichmentBatchProgress): String =
-        "Night ${progress.currentNightNumber} of ${progress.totalNightCount}. " +
+        "Night ${progress.currentNightNumber}/${progress.totalNightCount}. " +
             operationMessage(progress.operation.phase)
 
     private fun batchCompletionMessage(
@@ -879,9 +850,9 @@ object EnrichmentRuntimeStore {
         totalDreamCount: Int,
     ): String {
         val nightLabel = if (outcome.completedNightCount == 1) "night" else "nights"
-        val dreamLabel = if (totalDreamCount == 1) "dream record" else "dream records"
-        return "Enrichment complete: ${outcome.completedNightCount} $nightLabel processed and " +
-            "$totalDreamCount $dreamLabel saved."
+        val dreamLabel = if (totalDreamCount == 1) "dream" else "dreams"
+        return "Enrichment complete: ${outcome.completedNightCount} $nightLabel, " +
+            "$totalDreamCount $dreamLabel."
     }
 
     private fun batchFailureMessage(
@@ -902,8 +873,8 @@ object EnrichmentRuntimeStore {
                 .lastOrNull()
                 ?.code
                 ?.safeDetail
-            ?: "Local enrichment needs attention."
-        return "$lead: $counts $detail Existing raw transcripts were not changed."
+            ?: "Enrichment needs attention."
+        return "$lead: $counts $detail"
     }
 
     private data class RuntimeDependencies(
@@ -929,6 +900,14 @@ object EnrichmentRuntimeStore {
     }
 }
 
+internal fun EnrichmentRuntimeSnapshot.withThreadStartFailure(
+    initializing: Boolean,
+): EnrichmentRuntimeSnapshot = copy(
+    modelPhase = if (initializing) EnrichmentModelPhase.ERROR else modelPhase,
+    runtimePhase = EnrichmentRuntimePhase.ERROR,
+    runtimeError = "Enrichment could not start. Try again.",
+)
+
 internal fun recoveredEnrichmentFailureDetail(
     cause: EnrichmentInterruptionCause?,
 ): String = (cause?.failureCode() ?: EnrichmentFailureCode.UNKNOWN_PROCESS_LOSS)
@@ -947,20 +926,16 @@ private fun recoveredEnrichmentMessage(
     cause: EnrichmentInterruptionCause?,
 ): String = when (cause) {
     EnrichmentInterruptionCause.APP_HIDDEN ->
-        "Enrichment stopped because DreamLog was hidden. Saved work and raw transcripts remain; " +
-            "unfinished nights are ready to retry."
+        "Enrichment stopped: DreamLog was hidden. Retry unfinished nights."
 
     EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED ->
-        "Enrichment stopped because the screen turned off or the phone locked. Saved work and " +
-            "raw transcripts remain; unfinished nights are ready to retry."
+        "Enrichment stopped: screen off or phone locked. Retry unfinished nights."
 
     EnrichmentInterruptionCause.USER_CANCELLED ->
-        "Enrichment stopped at your request. Saved work and raw transcripts remain; unfinished " +
-            "nights are ready to retry."
+        "Enrichment cancelled. Retry unfinished nights when ready."
 
     null ->
-        "DreamLog stopped before enrichment completed. Saved work and raw transcripts remain; " +
-            "unfinished nights are ready to retry."
+        "Enrichment interrupted. Retry unfinished nights."
 }
 
 private class EnrichmentInterruptionJournal(context: Context) {
@@ -1011,7 +986,7 @@ private class EnrichmentInterruptionJournal(context: Context) {
 private val SELECTED_BACKEND = LiteRtEnrichmentBackend.GPU
 private const val BYTES_PER_MEBIBYTE = 1024.0 * 1024.0
 private const val APP_OPEN_MESSAGE =
-    "DreamLog is keeping the screen awake. Keep it visible and unlocked while enrichment runs."
+    "Keep DreamLog visible and your phone unlocked."
 private const val ENRICHMENT_INTERRUPTION_PREFERENCES = "enrichment_interruption"
 private const val ENRICHMENT_INTERRUPTION_ACTIVE_KEY = "active"
 private const val ENRICHMENT_INTERRUPTION_CAUSE_KEY = "cause"

@@ -23,6 +23,64 @@ class NightRepositoryTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun reconciliationLoadsHistoryGraphOnceAfterUpdatingFinalizedNights() {
+        val fixture = fixture("reconcile-history-loads")
+        val finalizedNights = listOf(
+            endedNightForDeletion("night-older", 1_000L),
+            endedNightForDeletion("night-a", 2_000L),
+            endedNightForDeletion("night-z", 2_000L).copy(
+                captureState = NightCaptureState.INTERRUPTED,
+                interrupted = true,
+            ),
+        ).map { it.copy(transcriptionState = ProcessingState.NOT_STARTED) }
+        val activeNight = endedNightForDeletion("night-active", 3_000L).copy(
+            captureState = NightCaptureState.ACTIVE,
+            endedAtEpochMillis = null,
+            endedUtcOffsetSeconds = null,
+            endReason = null,
+            transcriptionState = ProcessingState.NOT_STARTED,
+        )
+        (finalizedNights + activeNight).forEach { night ->
+            fixture.dao.seed(night, sessions = emptyList(), dreams = emptyList())
+        }
+        val reconciledNightIds = mutableListOf<String>()
+        val repository = NightRepository(
+            dao = fixture.dao,
+            journalStore = journal(fixture.journalRoot) { 4_000L },
+            audioRootDirectory = fixture.audioRoot,
+            rawAudioRetentionMillis = { null },
+            transcriptionStateReconciler = { nightId ->
+                reconciledNightIds += nightId
+                fixture.dao.upsertCaptureGraph(
+                    night = finalizedNights.single { it.nightId == nightId }.copy(
+                        transcriptionState = ProcessingState.COMPLETE,
+                    ),
+                    sessions = emptyList(),
+                    events = emptyList(),
+                )
+            },
+        )
+
+        val result = repository.reconcile(runtimeActiveNightId = activeNight.nightId)
+
+        assertEquals(listOf("night-z", "night-a", "night-older"), reconciledNightIds)
+        assertEquals(
+            listOf("night-active", "night-z", "night-a", "night-older"),
+            result.nights.map { it.night.nightId },
+        )
+        assertEquals(
+            listOf(
+                ProcessingState.NOT_STARTED,
+                ProcessingState.COMPLETE,
+                ProcessingState.COMPLETE,
+                ProcessingState.COMPLETE,
+            ),
+            result.nights.map { it.night.transcriptionState },
+        )
+        assertEquals(1, fixture.dao.historyGraphReadCount)
+    }
+
+    @Test
     fun captureIssueReviewPersistsOnlyFingerprintAndCanBeShownAgain() {
         val fixture = fixture("capture-issue-review")
         val night = endedNightForDeletion("capture-issue-review-night", 1_000L).copy(
@@ -1134,6 +1192,8 @@ class NightRepositoryTest {
         private val sessions = linkedMapOf<String, CaptureSessionEntity>()
         private val events = linkedMapOf<Pair<String, String>, NightEventEntity>()
         private val dreams = linkedMapOf<String, DreamWithSourceSpans>()
+        var historyGraphReadCount = 0
+            private set
 
         protected override fun upsertNight(night: NightEntity) {
             nights[night.nightId] = night
@@ -1149,13 +1209,27 @@ class NightRepositoryTest {
             }
         }
 
-        override fun readHistory(): List<NightWithDetails> =
-            nights.values
+        override fun readHistory(): List<NightWithDetails> {
+            historyGraphReadCount += 1
+            return nights.values
                 .sortedWith(
                     compareByDescending<NightEntity> { it.startedAtEpochMillis }
                         .thenByDescending { it.nightId },
                 )
                 .map(::details)
+        }
+
+        override fun readFinalizedNightIds(): List<String> =
+            nights.values
+                .filter {
+                    it.captureState == NightCaptureState.ENDED ||
+                        it.captureState == NightCaptureState.INTERRUPTED
+                }
+                .sortedWith(
+                    compareByDescending<NightEntity> { it.startedAtEpochMillis }
+                        .thenByDescending { it.nightId },
+                )
+                .map(NightEntity::nightId)
 
         override fun readNight(nightId: String): NightWithDetails? =
             nights[nightId]?.let(::details)

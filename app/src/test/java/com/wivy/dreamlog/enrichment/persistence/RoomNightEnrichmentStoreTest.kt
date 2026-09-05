@@ -64,9 +64,9 @@ class RoomNightEnrichmentStoreTest {
                     "The raw transcript remains available to retry after an app update. " +
                     "[code=$code; retryable=false]",
             ).orEmpty()
-            assertTrue(display.contains("previous enrichment path could not fit this night's transcript"))
+            assertTrue(display.contains("Transcript exceeded the earlier enrichment limit"))
             assertFalse(display.contains("this capture"))
-            assertTrue(display.contains("context budget"))
+            assertTrue(display.contains("enrichment limit"))
             assertFalse(display.contains("after an app update"))
             assertFalse(display.contains("[code="))
         }
@@ -383,7 +383,7 @@ class RoomNightEnrichmentStoreTest {
         )
 
         assertEquals(
-            "Local enrichment inference stopped. [code=inference_failed; retryable=true]",
+            "Dream generation stopped. [code=inference_failed; retryable=true]",
             gateway.failedDetail,
         )
         assertFalse(gateway.failedDetail!!.contains("private dream content"))

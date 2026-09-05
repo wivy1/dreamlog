@@ -62,8 +62,7 @@ private val UPGRADE_RETRYABLE_OVERSIZE_CODES = setOf(
     "capture_input_too_large",
 )
 private const val UPGRADE_RETRYABLE_OVERSIZE_DISPLAY_DETAIL =
-    "The previous enrichment path could not fit this night's transcript in the local model's " +
-        "context budget."
+    "Transcript exceeded the earlier enrichment limit."
 
 /**
  * Room-backed boundary between immutable M04 transcript evidence and M05 generated readings.

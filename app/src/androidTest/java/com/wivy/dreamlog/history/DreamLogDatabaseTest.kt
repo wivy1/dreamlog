@@ -44,6 +44,52 @@ class DreamLogDatabaseTest {
     }
 
     @Test
+    fun finalizedNightIdsExcludeUnfinishedStatesAndFollowHistoryOrder() {
+        database = openDatabase()
+        val dao = database!!.nightDao()
+        assertTrue(dao.readFinalizedNightIds().isEmpty())
+        val nights = listOf(
+            endedNight("night-older").copy(startedAtEpochMillis = 100L),
+            endedNight("night-a").copy(startedAtEpochMillis = 200L),
+            endedNight("night-z").copy(
+                startedAtEpochMillis = 200L,
+                captureState = NightCaptureState.INTERRUPTED,
+                interrupted = true,
+            ),
+            endedNight("night-active").copy(
+                startedAtEpochMillis = 500L,
+                captureState = NightCaptureState.ACTIVE,
+            ),
+            endedNight("night-starting").copy(
+                startedAtEpochMillis = 400L,
+                captureState = NightCaptureState.STARTING,
+            ),
+            endedNight("night-recovery").copy(
+                startedAtEpochMillis = 300L,
+                captureState = NightCaptureState.RECOVERY_REQUIRED,
+            ),
+        )
+        nights.forEach { night ->
+            dao.upsertCaptureGraph(night, sessions = emptyList(), events = emptyList())
+        }
+
+        assertEquals(listOf("night-z", "night-a", "night-older"), dao.readFinalizedNightIds())
+
+        dao.upsertCaptureGraph(
+            night = nights.single { it.nightId == "night-starting" }.copy(
+                captureState = NightCaptureState.INTERRUPTED,
+                interrupted = true,
+            ),
+            sessions = emptyList(),
+            events = emptyList(),
+        )
+        assertEquals(
+            listOf("night-starting", "night-z", "night-a", "night-older"),
+            dao.readFinalizedNightIds(),
+        )
+    }
+
+    @Test
     fun captureGraphSurvivesReopenAcrossMidnightAndHistoryIsNewestFirst() {
         val localMidnightEpochMillis = epochMillis("2026-07-30T05:00:00Z")
         val acrossMidnightNight = NightEntity(

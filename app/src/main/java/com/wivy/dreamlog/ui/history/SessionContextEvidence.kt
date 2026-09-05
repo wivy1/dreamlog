@@ -4,8 +4,7 @@ import com.wivy.dreamlog.history.DreamRecord
 import com.wivy.dreamlog.history.NightEventEntity
 
 internal const val POSSIBLE_MEDIA_FALSE_WAKE_MESSAGE =
-    "Phone media was playing when this wake was detected. This may be a false wake; " +
-        "review the source before keeping or deleting it."
+    "Possible false wake: media was playing. Review the source."
 
 internal fun mediaPlaybackActiveAtWakeSessionIds(
     events: List<NightEventEntity>,

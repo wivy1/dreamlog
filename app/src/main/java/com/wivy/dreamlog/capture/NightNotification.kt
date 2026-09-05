@@ -19,7 +19,7 @@ object NightNotification {
             "Active night",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Silent status while DreamLog is listening for recollections."
+            description = "Silent overnight recording status."
             setSound(null, null)
             enableVibration(false)
             setShowBadge(false)
@@ -74,23 +74,23 @@ object NightNotification {
     private fun notificationText(snapshot: CaptureRuntimeSnapshot): Pair<String, String> =
         when {
             snapshot.microphoneSilenced ->
-                "DreamLog is not listening" to "Android is silencing the microphone input"
+                "Microphone blocked" to "Check microphone access and other recorders"
 
             snapshot.phase == CapturePhase.STARTING ->
-                "DreamLog is starting" to "Verifying the microphone and local wake model"
+                "Starting night" to "Checking the microphone"
 
             snapshot.phase == CapturePhase.ACKNOWLEDGING ||
                 snapshot.phase == CapturePhase.RECORDING ->
-                "DreamLog is recording" to "Capturing a wake-triggered recollection"
+                "Recording dream" to "Speak naturally"
 
             snapshot.phase == CapturePhase.FINALIZING ->
-                "DreamLog is saving" to "Finalizing the current recollection"
+                "Saving recording" to "Finishing your dream"
 
             snapshot.visibleOtherRecorderCount > 0 ->
-                "Another recorder is active" to "Android may silence one of the microphone clients"
+                "Another recorder is active" to "It may block DreamLog's microphone"
 
             else ->
-                "DreamLog is listening" to
+                "Listening" to
                     "Say “DreamLog” or “Hey DreamLog”"
         }
 

@@ -124,7 +124,7 @@ internal object TranscriptionNotification {
             "Local transcription",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Progress for finite on-device transcription of retained audio."
+            description = "Offline transcription progress."
             setSound(null, null)
             enableVibration(false)
             setShowBadge(false)
@@ -149,7 +149,7 @@ internal object TranscriptionNotification {
         val progress = progressText(completedCount, eligibleCount)
         return Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_dreamlog)
-            .setContentTitle("DreamLog is transcribing")
+            .setContentTitle("Transcribing recordings")
             .setContentText(progress)
             .setCategory(Notification.CATEGORY_PROGRESS)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
@@ -170,6 +170,6 @@ internal object TranscriptionNotification {
         if (eligibleCount > 0) {
             "${completedCount.coerceIn(0, eligibleCount)} of $eligibleCount sessions complete"
         } else {
-            "Preparing the verified local model"
+            "Preparing model…"
         }
 }

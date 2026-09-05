@@ -72,6 +72,15 @@ abstract class NightDao {
     )
     abstract fun readHistory(): List<NightWithDetails>
 
+    @Query(
+        """
+        SELECT nightId FROM nights
+        WHERE captureState IN ('ended', 'interrupted')
+        ORDER BY startedAtEpochMillis DESC, nightId DESC
+        """,
+    )
+    abstract fun readFinalizedNightIds(): List<String>
+
     @Transaction
     @Query("SELECT * FROM nights WHERE nightId = :nightId LIMIT 1")
     abstract fun readNight(nightId: String): NightWithDetails?

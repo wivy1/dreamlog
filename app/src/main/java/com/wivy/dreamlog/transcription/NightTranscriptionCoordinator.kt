@@ -651,8 +651,13 @@ class NightTranscriptionCoordinator internal constructor(
             is IllegalStateException -> "local_inference_failed"
             else -> "unexpected_runtime_failure"
         }
-        return "Local transcription failed ($code). The retained audio was kept; " +
-            "resume transcription."
+        val explanation = if (failure is TranscriptionOutputException) {
+            failure.reason.safeDetail
+        } else {
+            transcriptionFailureExplanation(code)
+        }
+        return "Local transcription failed ($code). $explanation The retained audio was kept; " +
+            "resume transcription to retry."
     }
 
     private companion object {

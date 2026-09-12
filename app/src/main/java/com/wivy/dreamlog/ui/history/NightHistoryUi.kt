@@ -58,6 +58,7 @@ import com.wivy.dreamlog.history.SessionTranscriptRecord
 import com.wivy.dreamlog.playback.RawSessionPlaybackPhase
 import com.wivy.dreamlog.playback.RawSessionPlaybackState
 import com.wivy.dreamlog.playback.RawSessionPlayer
+import com.wivy.dreamlog.transcription.transcriptionFailureDisplayText
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 
@@ -448,7 +449,10 @@ private fun NightOutcomeSummary(
 
             resumeAction != null -> {
                 WarningText(
-                    "Transcription stopped. Resume below.",
+                    transcriptionFailureDisplayText(
+                        record.transcripts.firstOrNull { it.transcript.state == ProcessingState.FAILED }
+                            ?.transcript?.failureDetail ?: record.night.transcriptionFailure,
+                    ) ?: "Transcription has unfinished recordings. Audio is saved; continue below.",
                 )
                 Button(
                     onClick = onResumeTranscription,
@@ -468,10 +472,6 @@ private fun NightOutcomeSummary(
                 enrichmentFailureWarningText(record.night.enrichmentFailure),
             )
 
-            captureEvidence(record) != null -> WarningText(
-                "Capture issue. See Technical details.",
-            )
-
             record.dreams.isNotEmpty() -> Unit
 
             record.night.enrichmentState == ProcessingState.COMPLETE ->
@@ -481,6 +481,7 @@ private fun NightOutcomeSummary(
 
             else -> SupportingText("Continue processing from Home.")
         }
+        captureEvidence(record)?.let { WarningText(it) }
     }
 }
 
@@ -932,7 +933,7 @@ private fun TranscriptCard(
                 }
 
                 ProcessingState.FAILED -> {
-                    WarningText(value.failureDetail ?: "Transcription failed.")
+                    WarningText(transcriptionFailureDisplayText(value.failureDetail) ?: "Transcription failed.")
                     if (session?.audioState == AudioEvidenceState.RETAINED) {
                         Button(
                             onClick = onRetry,
@@ -1273,7 +1274,8 @@ internal fun morningDiagnostics(record: NightRecord): List<String> {
             night.captureState == NightCaptureState.INTERRUPTED ||
             night.captureState == NightCaptureState.RECOVERY_REQUIRED
         ) {
-            add("monitoring interrupted; check the end reason and incomplete sessions")
+            val reason = night.endReason?.let(::humanizeReason) ?: "reason unavailable"
+            add("Monitoring interrupted: $reason. Check recordings in Technical details.")
         }
         val incompleteSessions = record.sessions.filter {
             CaptureIssueFingerprint.isOwnerFacingIncompleteSession(record, it)
@@ -1282,6 +1284,16 @@ internal fun morningDiagnostics(record: NightRecord): List<String> {
             add(
                 "incomplete sessions: ${incompleteSessions.size}",
             )
+            incompleteSessions.filter {
+                it.incompleteReason != SessionIncompleteReason.AUDIO_GAP
+            }.forEach { session ->
+                val number = record.sessions.indexOf(session) + 1
+                add(
+                    "Recording $number may be incomplete: " +
+                        "${humanizeReason(requireNotNull(session.incompleteReason))}. " +
+                        "Check recordings in Technical details.",
+                )
+            }
         }
         val unavailableSessions = record.sessions.filter {
             it.audioState == AudioEvidenceState.MISSING ||
@@ -1289,9 +1301,15 @@ internal fun morningDiagnostics(record: NightRecord): List<String> {
                 it.audioState == AudioEvidenceState.PENDING_RECOVERY
         }
         if (unavailableSessions.isNotEmpty()) {
-            add(
-                "sessions with missing, corrupt, or unresolved audio: ${unavailableSessions.size}",
-            )
+            unavailableSessions.forEach { session ->
+                val number = record.sessions.indexOf(session) + 1
+                val explanation = when (session.audioState) {
+                    AudioEvidenceState.MISSING -> "is missing"
+                    AudioEvidenceState.CORRUPT -> "could not be validated"
+                    else -> "has not finished recovery"
+                }
+                add("Recording $number $explanation. Use Check recordings in Technical details.")
+            }
         }
         val persistedIncompleteSessionCount = record.sessions.count {
             it.incompleteReason != null
@@ -1304,13 +1322,14 @@ internal fun morningDiagnostics(record: NightRecord): List<String> {
         }
         captureFailureDiagnostics(record.events).forEach(::add)
         silencingDiagnostic(record)?.let(::add)
-        audioGapDiagnostic(record.events)?.let(::add)
+        audioGapDiagnostic(record)?.let(::add)
         heartbeatDiagnostic(record)?.let(::add)
+        add("This warning concerns recording, not uncertainty in your words.")
     }
 }
 
-private fun audioGapDiagnostic(events: List<NightEventEntity>): String? {
-    val affected = events.filter {
+private fun audioGapDiagnostic(record: NightRecord): String? {
+    val affected = record.events.filter {
         !it.sessionId.isNullOrBlank() && CaptureIssueFingerprint.isConfirmedAudioGap(it)
     }
     if (affected.isEmpty()) return null
@@ -1320,7 +1339,7 @@ private fun audioGapDiagnostic(events: List<NightEventEntity>): String? {
             ?.toLongOrNull()
             ?.takeIf { it >= 0L }
     }.maxOrNull()
-    return if (affected.size == 1) {
+    val estimateText = if (affected.size == 1) {
         largestEstimateMillis?.let { estimate ->
             "estimated audio-clock discontinuity: $estimate ms"
         } ?: "audio-clock discontinuity detected"
@@ -1330,6 +1349,15 @@ private fun audioGapDiagnostic(events: List<NightEventEntity>): String? {
             largestEstimateMillis?.let { append("; largest estimate: $it ms") }
         }
     }
+    val locations = affected.groupBy { it.sessionId }.map { (sessionId, events) ->
+        val index = record.sessions.indexOfFirst { it.sessionId == sessionId }
+        val recording = if (index >= 0) "Recording ${index + 1}" else "Recording"
+        val first = events.minBy { it.epochMillis }
+        val at = HistoryFormatters.time(first.epochMillis, first.utcOffsetSeconds)
+        "$recording; detected at $at"
+    }.joinToString("; ")
+    return "$locations: $estimateText. The audio clock indicates a possible gap; " +
+        "this does not prove words were lost. Play the recording to check."
 }
 
 internal fun sessionCaptureText(

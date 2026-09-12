@@ -21,7 +21,7 @@ class SherpaParakeetTranscriptionEngineTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
-    fun productionConfigurationPinsVersionThirteenParakeetGreedyDecoder() {
+    fun productionConfigurationPinsVersionFourteenParakeetGreedyDecoder() {
         val model = InstalledLocalAsrModel(
             directory = temporaryFolder.newFolder("model"),
             revision = "model-revision",
@@ -41,7 +41,7 @@ class SherpaParakeetTranscriptionEngineTest {
         assertEquals("greedy_search", config.decodingMethod)
         assertEquals(4, config.maxActivePaths)
         assertEquals(0f, config.blankPenalty)
-        assertEquals("13", metadata.engineVersion)
+        assertEquals("14", metadata.engineVersion)
         assertEquals("model-revision", metadata.modelVersion)
         assertEquals("a".repeat(64), metadata.modelSha256)
     }
@@ -85,6 +85,33 @@ class SherpaParakeetTranscriptionEngineTest {
                 transcript.copy(modelSha256 = "0".repeat(64)),
             ),
         )
+    }
+
+    @Test
+    fun nativePunctuationAfterWakeKeepsImmediateNarrationAndLaterWindows() {
+        val recognizer = RecordingRecognizer(recognitions = listOf(
+            SherpaRecognition("DREAM LOG, first.",
+                listOf(" DREAM", " LOG", " ", ",", " first", " ."),
+                listOf(0.2f, 0.4f, 0.5f, 0.6f, 0.9f, 1.2f)),
+            SherpaRecognition("second, capture.",
+                listOf(" second", " ,", " capture", " ."), listOf(0f, 0.3f, 1f, 1.2f)),
+        ))
+        val result = SherpaParakeetTranscriptionEngine.forTesting(recognizer).transcribe(
+            wav(ShortArray(640_000)),
+            TranscriptionInput(
+                acousticRange = Pcm16WavSource.RecognitionRange(0L, 640_000L),
+                contentStartSample = 16_000L,
+                triggeringWakePhrase = TriggeringWakePhrase.DREAM_LOG,
+                triggerReportSample = 12_800L,
+            ),
+        )
+        assertEquals("first. second, capture.", result.rawText)
+        assertEquals(listOf(
+            TranscriptionSegment(900L, 30_000L, "first."),
+            TranscriptionSegment(30_000L, 31_000L, "second,"),
+            TranscriptionSegment(31_000L, 40_000L, "capture."),
+        ), result.segments)
+        assertEquals(listOf(480_000, 160_000), recognizer.calls.map { it.samples.size })
     }
 
     @Test

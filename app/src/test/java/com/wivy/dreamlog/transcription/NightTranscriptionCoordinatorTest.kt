@@ -485,8 +485,8 @@ class NightTranscriptionCoordinatorTest {
         assertEquals(1, firstAttempt.transcript.attemptCount)
         assertTrue(firstAttempt.segments.isEmpty())
         assertEquals(
-            "Local transcription failed (local_inference_failed). The retained audio was kept; " +
-                "resume transcription.",
+            "Local transcription failed (local_inference_failed). The speech model could not " +
+                "finish this recording. The retained audio was kept; resume transcription to retry.",
             firstAttempt.transcript.failureDetail,
         )
         assertFalse(firstAttempt.transcript.failureDetail!!.contains("forced local inference"))
@@ -501,6 +501,95 @@ class NightTranscriptionCoordinatorTest {
         assertEquals(ProcessingState.COMPLETE, onlyRecord.transcript.state)
         assertEquals(listOf(0, 1), onlyRecord.segments.map { it.segmentIndex })
         assertTrue(harness.audioFile(ID_A).isFile)
+    }
+
+    @Test
+    fun invalidModelTimestampsPersistAnExplanationWithoutRecognitionContent() {
+        val harness = harness(sessions = listOf(session(ID_A, captureOrder = 0)))
+        val engine = FakeEngine().apply {
+            recognition = SherpaRecognition(
+                text = "PRIVATE NARRATION",
+                tokens = listOf(" PRIVATE", " NARRATION"),
+                timestampsSeconds = listOf(0.8f, 0.2f),
+            )
+        }
+        val coordinator = harness.coordinator(engine)
+
+        val failed = coordinator.processNight(NIGHT_ID)
+
+        assertEquals(listOf(ID_A), failed.retryableSessionIds)
+        val attempt = harness.transcriptionDao.readSessionTranscript(ID_A)!!
+        assertEquals(
+            "Local transcription failed (local_inference_failed). The speech model returned " +
+                "invalid word times (invalid_timestamps). The retained audio was kept; " +
+                "resume transcription to retry.",
+            attempt.transcript.failureDetail,
+        )
+        assertFalse(attempt.transcript.failureDetail!!.contains("PRIVATE"))
+        assertFalse(attempt.transcript.failureDetail!!.contains("NARRATION"))
+        assertTrue(attempt.segments.isEmpty())
+        assertTrue(harness.audioFile(ID_A).isFile)
+
+        engine.recognition = null
+        val retried = coordinator.retrySession(NIGHT_ID, ID_A)
+        assertEquals(1, retried.completedSessionCount)
+        assertEquals(2, harness.transcriptionDao.readSessionTranscript(ID_A)!!.transcript.attemptCount)
+        assertTrue(harness.audioFile(ID_A).isFile)
+    }
+
+    @Test
+    fun savedFailureDisplayExplainsKnownReasonsAndDoesNotEchoUnknownPayloads() {
+        assertEquals(null, transcriptionFailureDisplayText(null))
+        assertEquals(null, transcriptionFailureDisplayText("  "))
+        val legacy = transcriptionFailureDisplayText(
+            "Local transcription failed (local_inference_failed). The retained audio was kept; " +
+                "resume transcription.",
+        )!!
+        assertTrue(legacy.contains("The speech model could not finish this recording"))
+        assertTrue(legacy.contains("The original failure did not record a more specific cause"))
+        assertFalse(legacy.contains("local_inference_failed"))
+        assertEquals(
+            legacy,
+            transcriptionFailureDisplayText("PRIVATE [code=local_inference_failed; retryable=true]"),
+        )
+        val typed = transcriptionFailureDisplayText(
+            "Local transcription failed (local_inference_failed). The speech model returned " +
+                "invalid word times (invalid_timestamps). The retained audio was kept; " +
+                "resume transcription to retry.",
+        )!!
+        assertTrue(typed.contains("The speech model returned invalid word times."))
+        assertFalse(typed.contains("invalid_timestamps"))
+        assertFalse(typed.contains("original failure"))
+        assertEquals(
+            "Transcription could not finish. Audio is saved; resume transcription to retry.",
+            transcriptionFailureDisplayText("PRIVATE unknown failure [code=unknown; retryable=true]"),
+        )
+    }
+
+    @Test
+    fun failureCategoriesKeepTheirCodesWithoutPersistingExceptionPayloads() {
+        val cases = listOf(
+            SecurityException("PRIVATE") to "source_access_denied",
+            java.io.IOException("PRIVATE") to "source_read_failed",
+            IllegalArgumentException("PRIVATE") to "input_invalid",
+            IllegalStateException("PRIVATE") to "local_inference_failed",
+            RuntimeException("PRIVATE") to "unexpected_runtime_failure",
+        )
+        cases.forEach { (failure, code) ->
+            val harness = harness(sessions = listOf(session(ID_A, captureOrder = 0)))
+            harness.coordinator(FakeEngine().apply { forcedFailure = failure }).processNight(NIGHT_ID)
+            val detail = harness.transcriptionDao.readSessionTranscript(ID_A)!!
+                .transcript.failureDetail!!
+            assertTrue(detail.contains("($code)"))
+            assertTrue(detail.contains("The retained audio was kept"))
+            assertFalse(detail.contains("PRIVATE"))
+            val display = transcriptionFailureDisplayText(detail)!!
+            assertFalse(display.contains("PRIVATE"))
+            if (code == "source_access_denied" || code == "source_read_failed") {
+                assertTrue(display.contains("Use Check recordings in Technical details, then retry."))
+                assertFalse(display.contains("Audio is saved"))
+            }
+        }
     }
 
     @Test
@@ -863,6 +952,8 @@ class NightTranscriptionCoordinatorTest {
         var decodeLimit: Long? = null
         var failuresRemaining = 0
         var failOnCallNumber: Int? = null
+        var recognition: SherpaRecognition? = null
+        var forcedFailure: Exception? = null
 
         override val maximumDecodeSampleCount: Long?
             get() = decodeLimit
@@ -872,9 +963,13 @@ class NightTranscriptionCoordinatorTest {
             input: TranscriptionInput?,
         ): TranscriptionResult {
             calls += audioFile to checkNotNull(input)
+            forcedFailure?.let { throw it }
             if (calls.size == failOnCallNumber || failuresRemaining > 0) {
                 if (failuresRemaining > 0) failuresRemaining -= 1
                 error("forced local inference failure")
+            }
+            recognition?.let {
+                return SherpaTokenSegmenter.segment(it, sourceDurationMillis = 1_000L)
             }
             val text = "text for ${audioFile.name}"
             return TranscriptionResult(

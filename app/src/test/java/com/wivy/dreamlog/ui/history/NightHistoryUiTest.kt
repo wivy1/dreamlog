@@ -32,6 +32,81 @@ import org.junit.Test
 
 class NightHistoryUiTest {
     @Test
+    fun captureGapExplanationIdentifiesRecordingAndDoesNotClaimLostWords() {
+        val base = nightRecord()
+        val gapAt = base.sessions.single().startedAtEpochMillis!! + 20_000L
+        val affected = base.copy(
+            sessions = base.sessions.map {
+                it.copy(incompleteReason = SessionIncompleteReason.AUDIO_GAP)
+            },
+            events = listOf(
+                event(
+                    eventId = "confirmed-gap",
+                    epochMillis = gapAt,
+                    type = "audio_gap",
+                    attributes = mapOf(
+                        "estimated_gap_millis" to "128",
+                        "evidence" to "confirmed_persistent_timestamp_deficit",
+                    ),
+                    sessionId = "session-1",
+                ),
+            ),
+        )
+
+        val explanation = captureEvidence(affected).orEmpty()
+        assertTrue(explanation.contains("Recording 1"))
+        assertTrue(explanation.contains(HistoryFormatters.time(gapAt, -5 * 60 * 60)))
+        assertTrue(explanation.contains("128 ms"))
+        assertTrue(explanation.contains("possible gap", ignoreCase = true))
+        assertTrue(explanation.contains("does not prove words were lost"))
+        assertTrue(explanation.contains("Play the recording"))
+        assertTrue(explanation.contains("uncertainty in your words"))
+
+        val reviewed = affected.copy(
+            night = affected.night.copy(
+                captureIssueReviewedFingerprint = CaptureIssueFingerprint.current(affected),
+            ),
+        )
+        assertNull(captureEvidence(reviewed))
+        assertTrue(captureEvidenceText(reviewed).orEmpty().contains("128 ms"))
+    }
+
+    @Test
+    fun captureExplanationSeparatesMissingDamagedAndUnfinishedRecordings() {
+        val base = nightRecord()
+        val expected = mapOf(
+            AudioEvidenceState.MISSING to "Recording 1 is missing",
+            AudioEvidenceState.CORRUPT to "Recording 1 could not be validated",
+            AudioEvidenceState.PENDING_RECOVERY to "Recording 1 has not finished recovery",
+        )
+        expected.forEach { (state, description) ->
+            val explanation = captureEvidence(
+                base.copy(sessions = base.sessions.map { it.copy(audioState = state) }),
+            ).orEmpty()
+            assertTrue("$state: $explanation", explanation.contains(description))
+            assertTrue(explanation.contains("Check recordings"))
+        }
+    }
+
+    @Test
+    fun interruptedCaptureExplainsKnownEndReasonWithoutGuessingCause() {
+        val base = nightRecord()
+        val explanation = captureEvidence(
+            base.copy(
+                night = base.night.copy(
+                    interrupted = true,
+                    endReason = "process_interrupted",
+                    lastHeartbeatEpochMillis = base.night.startedAtEpochMillis + 60_000L,
+                ),
+            ),
+        ).orEmpty()
+        assertTrue(explanation.contains("App interrupted"))
+        assertTrue(explanation.contains("Later listening is unconfirmed"))
+        assertTrue(explanation.contains("Check recordings"))
+        assertFalse(explanation.contains("Android killed"))
+    }
+
+    @Test
     fun savedAudioInspectionTextDistinguishesCleanAndRecoverableArtifacts() {
         assertEquals(
             "All 4 recordings verified. No additional recordings or partial files.",
@@ -774,7 +849,7 @@ class NightHistoryUiTest {
             assertTrue(
                 captureEvidence(affected)
                     .orEmpty()
-                    .contains("sessions with missing, corrupt, or unresolved audio: 1"),
+                    .contains("Recording 1"),
             )
         }
     }

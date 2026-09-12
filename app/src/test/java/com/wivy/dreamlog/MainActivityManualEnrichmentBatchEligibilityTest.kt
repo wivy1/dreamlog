@@ -29,6 +29,53 @@ import org.junit.Test
 
 class MainActivityManualEnrichmentBatchEligibilityTest {
     @Test
+    fun unfinishedTranscriptionOffersStartingANightWithoutChangingSavedWork() {
+        val pending = record(transcriptionState = ProcessingState.NOT_STARTED, transcripts = emptyList())
+        val action = homeMorningAction(pending, TranscriptionRuntimeSnapshot(
+            modelPhase = TranscriptionModelPhase.INSTALLED,
+        ), EnrichmentRuntimeSnapshot(), emptyList())
+        assertTrue(canStartNightInstead(action, startEnabled = true))
+        assertFalse(canStartNightInstead(action, startEnabled = false))
+        assertEquals("Ready to transcribe", action?.title)
+        assertEquals("Transcribe", action?.buttonLabel)
+        assertTrue(pending.transcripts.isEmpty())
+    }
+
+    @Test
+    fun pausedTranscriptionOffersStartingANightButRunningProcessingDoesNot() {
+        val paused = HomeMorningAction(HomeNextActionKind.RESUME_TRANSCRIPTION, "Paused", "")
+        assertTrue(canStartNightInstead(paused, true))
+        assertFalse(canStartNightInstead(paused, false))
+        assertFalse(canStartNightInstead(HomeMorningAction(HomeNextActionKind.TRANSCRIBING, "Running", ""), true))
+    }
+
+    @Test
+    fun openingOldUnstartedHistoryDoesNotAutomaticallyClaimProcessing() {
+        val pending = record(transcriptionState = ProcessingState.NOT_STARTED, transcripts = emptyList())
+        assertNull(automaticTranscriptionNightId(listOf(pending), CaptureRuntimeSnapshot(), null))
+        val justEnded = CaptureRuntimeSnapshot(
+            capture = CaptureSnapshot(phase = CapturePhase.ENDED), nightId = NIGHT_ID,
+        )
+        assertEquals(NIGHT_ID, automaticTranscriptionNightId(listOf(pending), justEnded, null))
+        assertNull(automaticTranscriptionNightId(listOf(pending), justEnded, NIGHT_ID))
+        assertNull(automaticTranscriptionNightId(listOf(pending), justEnded.copy(nightId = "new-night"), null))
+        assertNull(automaticTranscriptionNightId(listOf(pending), justEnded.copy(
+            capture = CaptureSnapshot(phase = CapturePhase.LISTENING),
+        ), null))
+    }
+
+    @Test
+    fun anOlderUnfinishedNightStaysAvailableAfterANewerNightCompletes() {
+        val completed = record().copy(night = record().night.copy(nightId = "new-night"))
+        val pending = record(transcriptionState = ProcessingState.NOT_STARTED, transcripts = emptyList())
+        assertEquals(pending, pendingTranscriptionNight(listOf(completed, pending)))
+        assertNull(pendingTranscriptionNight(listOf(completed)))
+        assertNull(pendingTranscriptionNight(listOf(pending.copy(
+            night = pending.night.copy(captureState = NightCaptureState.ACTIVE),
+        ))))
+    }
+
+    @Test
     fun landscapeUsesTwoColumnsWhilePortraitStaysSingleColumn() {
         assertEquals(HomeLayoutMode.TWO_COLUMN, homeLayoutMode(isLandscape = true))
         assertEquals(HomeLayoutMode.SINGLE_COLUMN, homeLayoutMode(isLandscape = false))

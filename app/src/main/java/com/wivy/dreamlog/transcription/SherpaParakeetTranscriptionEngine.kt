@@ -105,7 +105,7 @@ internal class SherpaParakeetTranscriptionEngine private constructor(
 
         private const val CURRENT_LOCALE_TAG = "en-US"
         private const val CURRENT_ENGINE_ID = "sherpa-onnx-offline-transducer"
-        private const val CURRENT_ENGINE_VERSION = "13"
+        private const val CURRENT_ENGINE_VERSION = "14"
         private const val CURRENT_RUNTIME_ID = "sherpa-onnx"
         private const val SHERPA_RUNTIME_VERSION = "1.13.4"
         private const val MILLIS_PER_SECOND = 1_000L

@@ -33,19 +33,19 @@ internal object SherpaTokenSegmenter {
             "Non-empty transcription text has no source duration."
         }
 
-        check(recognition.tokens.isNotEmpty()) {
-            "The local recognizer did not return timestamped tokens."
+        if (recognition.tokens.isEmpty()) {
+            throw TranscriptionOutputException(TranscriptionOutputFailure.MISSING_TOKENS)
         }
-        check(recognition.tokens.size == recognition.timestampsSeconds.size) {
-            "The local recognizer returned inconsistent token timestamps."
+        if (recognition.tokens.size != recognition.timestampsSeconds.size) {
+            throw TranscriptionOutputException(TranscriptionOutputFailure.TIMESTAMP_COUNT_MISMATCH)
         }
-        check(
-            timestampsAreUsable(
+        if (
+            !timestampsAreUsable(
                 timestamps = recognition.timestampsSeconds,
                 sourceDurationMillis = sourceDurationMillis,
-            ),
+            )
         ) {
-            "The local recognizer returned invalid source timestamps."
+            throw TranscriptionOutputException(TranscriptionOutputFailure.INVALID_TIMESTAMPS)
         }
 
         val tokenStarts = recognition.timestampsSeconds.map { timestamp ->
@@ -53,16 +53,17 @@ internal object SherpaTokenSegmenter {
                 .roundToLong()
                 .coerceIn(0L, sourceDurationMillis - 1L)
         }
-        val words = groupTokens(recognition.tokens, tokenStarts)
-        check(words.isNotEmpty()) {
-            "The local recognizer returned text without timestamped words."
+        val words = groupTokens(reconcileNativePunctuationSpacing(recognition.tokens), tokenStarts)
+        if (words.isEmpty()) {
+            throw TranscriptionOutputException(TranscriptionOutputFailure.MISSING_TIMED_WORDS)
         }
-        check(canonical(words.joinToString(separator = " ") { it.text }) == canonical(rawText)) {
-            "The local recognizer's timestamped tokens do not match its text."
+        if (canonical(words.joinToString(separator = " ") { it.text }) != canonical(rawText)) {
+            throw TranscriptionOutputException(TranscriptionOutputFailure.TOKEN_TEXT_MISMATCH)
         }
 
         val retainedWords = selectNarrationWords(
             words = words,
+            originalWords = if (contentStartMillis > 0L) groupTokens(recognition.tokens, tokenStarts) else words,
             contentStartMillis = contentStartMillis,
             triggeringWakePhrase = triggeringWakePhrase,
             triggerReportMillis = triggerReportMillis,
@@ -109,6 +110,7 @@ internal object SherpaTokenSegmenter {
      */
     private fun selectNarrationWords(
         words: List<TimedText>,
+        originalWords: List<TimedText>,
         contentStartMillis: Long,
         triggeringWakePhrase: TriggeringWakePhrase?,
         triggerReportMillis: Long?,
@@ -130,6 +132,14 @@ internal object SherpaTokenSegmenter {
             exactMatches.lastOrNull { match ->
                 words[match.first].startMillis >= earliestGroundedStart
             }
+        }
+        // A formatting repair must never merge narration into an early word that the fallback
+        // would discard. Keep this ambiguous attempt retryable instead of silently losing text.
+        if (selectedMatch == null &&
+            originalWords.takeWhile { it.startMillis < contentStartMillis } !=
+            words.takeWhile { it.startMillis < contentStartMillis }
+        ) {
+            throw TranscriptionOutputException(TranscriptionOutputFailure.WAKE_BOUNDARY_MISMATCH)
         }
         return if (selectedMatch != null) {
             words.drop(selectedMatch.last + 1)
@@ -174,6 +184,31 @@ internal object SherpaTokenSegmenter {
                 (index == 0 || timestamp >= previous)
             previous = timestamp
             usable
+        }
+    }
+
+    /**
+     * sherpa-onnx 1.13.4 Convert normalizes final text without changing its timestamped tokens.
+     * Match the ASCII-punctuation branch of RemoveSpaceBetweenCjk for the pinned English model:
+     * remove only the immediately preceding ASCII space, using original neighbors. Keeping token
+     * slots (including empty ones) preserves all timestamps; the exact text check still applies.
+     */
+    private fun reconcileNativePunctuationSpacing(tokens: List<String>): List<String> {
+        val expanded = tokens.map { it.replace(SENTENCE_PIECE_WORD_BOUNDARY, ' ') }
+        val original = expanded.joinToString(separator = "")
+        var offset = 0
+        return expanded.map { token ->
+            val result = buildString(token.length) {
+                token.forEachIndexed { index, character ->
+                    val position = offset + index
+                    val next = original.getOrNull(position + 1)
+                    val removedByNative = character == ' ' && position > 0 && next != null &&
+                        (next in '!'..'/' || next in ':'..'@' || next in '['..'`' || next in '{'..'~')
+                    if (!removedByNative) append(character)
+                }
+            }
+            offset += token.length
+            result
         }
     }
 

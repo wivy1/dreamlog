@@ -133,6 +133,7 @@ import com.wivy.dreamlog.transcription.SherpaParakeetTranscriptionEngine
 import com.wivy.dreamlog.transcription.TranscriptionRuntimePhase
 import com.wivy.dreamlog.transcription.TranscriptionRuntimeSnapshot
 import com.wivy.dreamlog.transcription.TranscriptionRuntimeStore
+import com.wivy.dreamlog.transcription.transcriptionFailureDisplayText
 import com.wivy.dreamlog.ui.history.DreamDetailScreen
 import com.wivy.dreamlog.ui.history.NightDetailScreen
 import com.wivy.dreamlog.ui.history.NightHistorySection
@@ -1322,7 +1323,35 @@ internal fun enrichmentForegroundLossCause(
 internal fun canStartNightInstead(
     morningAction: HomeMorningAction?,
     startEnabled: Boolean,
-): Boolean = morningAction?.kind == HomeNextActionKind.ENRICH && startEnabled
+): Boolean = morningAction?.kind in setOf(
+    HomeNextActionKind.ENRICH,
+    HomeNextActionKind.RESUME_TRANSCRIPTION,
+) && startEnabled
+
+internal fun automaticTranscriptionNightId(
+    nights: List<NightRecord>,
+    captureRuntime: CaptureRuntimeSnapshot,
+    processingNightId: String?,
+): String? {
+    if (captureRuntime.phase !in setOf(CapturePhase.ENDED, CapturePhase.INTERRUPTED)) return null
+    return nights.firstOrNull { record ->
+        record.night.nightId == captureRuntime.nightId &&
+            record.night.captureState in setOf(NightCaptureState.ENDED, NightCaptureState.INTERRUPTED) &&
+            record.hasUnclaimedRetainedTranscriptionSession() &&
+            record.night.nightId != processingNightId
+    }?.night?.nightId
+}
+
+internal fun pendingTranscriptionNight(nights: List<NightRecord>): NightRecord? =
+    nights.firstOrNull { record ->
+        record.night.captureState in setOf(NightCaptureState.ENDED, NightCaptureState.INTERRUPTED) &&
+            (record.hasUnclaimedRetainedTranscriptionSession() || record.transcripts.any { transcript ->
+                transcript.transcript.state == ProcessingState.FAILED && record.sessions.any {
+                    it.sessionId == transcript.transcript.sessionId &&
+                        it.audioState == AudioEvidenceState.RETAINED
+                }
+            })
+    }
 
 private fun enrichmentInterruptionMessage(
     cause: EnrichmentInterruptionCause,
@@ -1539,12 +1568,8 @@ private fun DreamLogApp(
             showLeaveEnrichmentConfirmation = false
         }
     }
-    val automaticTranscriptionNightId = remember(historyUiState.nights, transcriptionRuntime.nightId) {
-        historyUiState.nights.firstOrNull { record ->
-            record.night.captureState in setOf(NightCaptureState.ENDED, NightCaptureState.INTERRUPTED) &&
-                record.hasUnclaimedRetainedTranscriptionSession() &&
-                record.night.nightId != transcriptionRuntime.nightId
-        }?.night?.nightId
+    val automaticTranscriptionNightId = remember(historyUiState.nights, runtime, transcriptionRuntime.nightId) {
+        automaticTranscriptionNightId(historyUiState.nights, runtime, transcriptionRuntime.nightId)
     }
     val readyEnrichmentRecords = remember(historyUiState.nights) {
         historyUiState.nights.filter { record ->
@@ -1704,8 +1729,8 @@ private fun DreamLogApp(
         }
     }
 
-    // Raw transcription continues automatically. Dream enrichment is deliberately owner-triggered
-    // so several ready nights can be frozen into one finite, model-reusing batch.
+    // Transcribe the night just ended in this process. Opening old unfinished history must leave
+    // the owner free to start tonight; those recordings remain available for an explicit resume.
     LaunchedEffect(
         runtime.active,
         transcriptionRuntime.modelPhase,
@@ -2077,7 +2102,7 @@ private fun DreamLogScreen(
         )
     }
     val morningAction = homeMorningAction(
-        latestResult = latestResult,
+        latestResult = pendingTranscriptionNight(historyUiState.nights) ?: latestResult,
         transcriptionRuntime = transcriptionRuntime,
         enrichmentRuntime = enrichmentRuntime,
         readyEnrichmentRecords = readyEnrichmentRecords,
@@ -2142,7 +2167,7 @@ private fun DreamLogScreen(
         !runtime.active && !startupChecking &&
             (
                 morningAction == null ||
-                    (morningAction.kind == HomeNextActionKind.ENRICH &&
+                    (canStartNightInstead(morningAction, startEnabled = true) &&
                         !startEnabled &&
                         setupNeedsAttention)
                 )
@@ -3160,7 +3185,7 @@ internal fun homeMorningAction(
     val runtimeRecord = record?.takeIf { it.night.nightId == transcriptionRuntime.nightId }
     val totalSessionCount = when {
         (transcriptionRuntime.transcriptionPhase == TranscriptionRuntimePhase.RUNNING ||
-            transcriptionRuntime.resumeAvailable) &&
+            (runtimeRecord != null && transcriptionRuntime.resumeAvailable)) &&
             transcriptionRuntime.eligibleSessionCount > 0 ->
             transcriptionRuntime.eligibleSessionCount
 
@@ -3168,7 +3193,7 @@ internal fun homeMorningAction(
     }
     val completedSessionCount = when {
         (transcriptionRuntime.transcriptionPhase == TranscriptionRuntimePhase.RUNNING ||
-            transcriptionRuntime.resumeAvailable) &&
+            (runtimeRecord != null && transcriptionRuntime.resumeAvailable)) &&
             transcriptionRuntime.eligibleSessionCount > 0 ->
             transcriptionRuntime.completedSessionCount
 
@@ -3237,13 +3262,23 @@ internal fun homeMorningAction(
             TranscriptionModelPhase.VERIFICATION_DEFERRED,
             TranscriptionModelPhase.VERIFYING,
         )
+        val neverStarted = record.transcripts.isEmpty() &&
+            record.night.transcriptionState == ProcessingState.NOT_STARTED &&
+            runtimeRecord?.let { transcriptionRuntime.pauseReason } == null
+        val explanation = transcriptionFailureDisplayText(failedSession?.failureDetail)
+            ?: runtimeRecord?.let { transcriptionRuntime.pauseMessage }
+            ?: transcriptionFailureDisplayText(record.night.transcriptionFailure)
         return HomeMorningAction(
             kind = HomeNextActionKind.RESUME_TRANSCRIPTION,
-            title = "Transcription paused",
-            body = "$completedSessionCount of $totalSessionCount recordings complete. Audio is saved.",
+            title = if (neverStarted) "Ready to transcribe" else "Transcription paused",
+            body = listOfNotNull(
+                explanation,
+                "$completedSessionCount of $totalSessionCount recordings complete.",
+                "Audio is saved.".takeIf { explanation == null },
+            ).joinToString(" "),
             buttonLabel = when {
                 checkingModel -> "Checking model…"
-                modelReady -> "Resume transcription"
+                modelReady -> if (neverStarted) "Transcribe" else "Resume transcription"
                 else -> "Set up transcription"
             },
             nightId = record.night.nightId,
@@ -3338,7 +3373,7 @@ private fun HomePrimaryActionCard(
     }
     val actionableMorningAction = morningAction?.takeIf { !checking && it.buttonLabel != null }
     val active = runtime.active
-    val showStartNightInstead = !checking && !active && morningAction?.kind == HomeNextActionKind.ENRICH
+    val showStartNightInstead = !checking && !active && canStartNightInstead(morningAction, startEnabled = true)
     val startNightInsteadEnabled = canStartNightInstead(morningAction, startEnabled)
     val title = homePrimaryStatusTitle(
         runtime = runtime,
@@ -3482,6 +3517,13 @@ private fun HomePrimaryActionCard(
                 ) {
                     Text("Start night instead")
                 }
+                Text(
+                    "Earlier recordings stay saved. Finish processing later.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 if (!startNightInsteadEnabled && setupNeedsAttention) {
                     Text(
                         text = "Resolve setup below before starting a new night.",

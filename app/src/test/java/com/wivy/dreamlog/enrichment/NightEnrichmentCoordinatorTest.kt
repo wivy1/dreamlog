@@ -48,10 +48,10 @@ class NightEnrichmentCoordinatorTest {
     @Test
     fun malformedOrWrongJsonOutputFailsDurablyAndKeepsRawFallback() {
         listOf(
-            EnrichmentEngineResult("{") to EnrichmentOutputReason.MALFORMED_JSON,
+            EnrichmentEngineResult("{") to EnrichmentOutputReason.INCOMPLETE_JSON,
             EnrichmentEngineResult("{}") to EnrichmentOutputReason.WRONG_FIELDS,
             EnrichmentEngineResult("{\"parts\":[]} trailing") to
-                EnrichmentOutputReason.MALFORMED_JSON,
+                EnrichmentOutputReason.TRAILING_CONTENT,
         ).forEach { (response, expectedReason) ->
             val source = completedSource()
             val store = FakeStore(source)
@@ -71,6 +71,167 @@ class NightEnrichmentCoordinatorTest {
             assertFalse(store.failed!!.detail.contains("quiet moon"))
             assertEquals(1, engineFactory.closeCount)
         }
+    }
+
+    @Test
+    fun capacityEvidenceOnlyReclassifiesEmptyOrIncompleteResponses() {
+        listOf(
+            "" to EnrichmentOutputReason.CONTEXT_LIMIT_REACHED,
+            "{" to EnrichmentOutputReason.CONTEXT_LIMIT_REACHED,
+            "{}" to EnrichmentOutputReason.WRONG_FIELDS,
+            "{\"parts\":trX" to EnrichmentOutputReason.MALFORMED_JSON,
+            "{\"parts\":[]} trailing" to EnrichmentOutputReason.TRAILING_CONTENT,
+        ).forEach { (output, expectedReason) ->
+            val store = FakeStore(completedSource())
+            val factory = FakeEngineFactory(response = {
+                EnrichmentEngineResult(output, contextLimitReached = true)
+            })
+
+            val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+            assertTrue(outcome is EnrichmentRunOutcome.Failure)
+            assertEquals(expectedReason.safeDetail, store.failed?.detail)
+            assertEquals(0, store.completeCount)
+            assertEquals(1, factory.generateCount)
+        }
+
+        val store = FakeStore(completedSource())
+        val factory = FakeEngineFactory(response = {
+            EnrichmentEngineResult(validOutput(), contextLimitReached = true)
+        })
+        assertTrue(coordinator(store, factory, FakeGate()).processNight(NIGHT_ID) is
+            EnrichmentRunOutcome.Completed)
+        assertEquals(1, store.completeCount)
+    }
+
+    @Test
+    fun exhaustedRequestsShrinkRepeatedlyAndSaveOneCompleteNight() {
+        val source = completedSource(capacityTestSegments(8))
+        val store = FakeStore(source)
+        val aliasCounts = mutableListOf<Int>()
+        val factory = FakeEngineFactory(response = { request ->
+            val count = requestAliases(request).size
+            aliasCounts += count
+            if (count > 2) {
+                EnrichmentEngineResult("{", contextLimitReached = true)
+            } else {
+                EnrichmentEngineResult(outputCoveringRequest(request))
+            }
+        })
+
+        val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Completed)
+        assertEquals(listOf(8, 4, 2, 2, 4, 2, 2), aliasCounts)
+        assertEquals(1, store.claimCount)
+        assertEquals(1, store.completeCount)
+        assertEquals(1, factory.openCount)
+        assertEquals(1, factory.closeCount)
+        assertEquals(1, store.completed!!.dreams.size)
+        assertEquals(
+            source.segments.map(NightTranscriptSegment::id),
+            store.completed!!.dreams.single().sourceSpans.flatMap(EnrichedSourceSpan::segmentIds),
+        )
+        assertEquals(OrderedNightTranscript.create(NIGHT_ID, source.segments).fingerprintSha256,
+            store.completed!!.inputFingerprintSha256)
+    }
+
+    @Test
+    fun recursiveRecoveryResolvesEarlierDreamReferencesAndPreservesCaptureBoundaries() {
+        val texts = listOf(
+            "THE FIRST DREAM WAS ON A TRAIN",
+            "garden ".repeat(20).trim(),
+            "MY NEXT DREAM WAS IN A LIBRARY",
+            "cloud ".repeat(20).trim(),
+            "BACK IN THE FIRST DREAM THE TRAIN ENTERED A TUNNEL",
+            "rain ".repeat(20).trim(),
+            "CORRECTION THE FIRST DREAM HAD A BLUE TRAIN",
+            "river ".repeat(20).trim(),
+        )
+        val segments = texts.mapIndexed { index, text ->
+            sourceSegment("session-a", 0, index, text)
+        } + sourceSegment("session-b", 1, text = "A separate capture")
+        val store = FakeStore(completedSource(segments))
+        val factory = FakeEngineFactory(response = { request ->
+            if (requestAliases(request).size > 1) {
+                EnrichmentEngineResult("{", contextLimitReached = true)
+            } else {
+                EnrichmentEngineResult(validOutput())
+            }
+        })
+
+        val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Completed)
+        val dreams = store.completed!!.dreams
+        assertEquals(3, dreams.size)
+        assertEquals(listOf(0, 1, 4, 5, 6, 7), dreams[0].sourceSpans.flatMap { span ->
+            span.segmentIds.map(SourceSegmentId::segmentIndex)
+        })
+        assertEquals(listOf(2, 3), dreams[1].sourceSpans.flatMap { span ->
+            span.segmentIds.map(SourceSegmentId::segmentIndex)
+        })
+        assertEquals(listOf(segments.last().id), dreams[2].sourceSpans.flatMap(EnrichedSourceSpan::segmentIds))
+        assertTrue(dreams[0].sourceSpans.filter { span -> span.segmentIds.any { it.segmentIndex >= 6 } }
+            .all { it.role == DreamSourceRole.CORRECTION })
+        assertTrue(factory.generateCount <= 2 * segments.size - 1)
+        assertEquals(1, store.completeCount)
+    }
+
+    @Test
+    fun failureAfterARecoveredChunkStillSavesNothing() {
+        val source = completedSource(capacityTestSegments(4))
+        val store = FakeStore(source)
+        var invocation = 0
+        val factory = FakeEngineFactory(response = { request ->
+            invocation += 1
+            when (invocation) {
+                1 -> EnrichmentEngineResult("{", contextLimitReached = true)
+                2 -> EnrichmentEngineResult(outputCoveringRequest(request))
+                else -> EnrichmentEngineResult("{\"parts\":trX")
+            }
+        })
+
+        val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Failure)
+        assertEquals(3, factory.generateCount)
+        assertEquals(0, store.completeCount)
+        assertNull(store.completed)
+        assertEquals(source, store.source)
+        assertEquals(EnrichmentOutputReason.MALFORMED_JSON.safeDetail, store.failed?.detail)
+    }
+
+    @Test
+    fun syntaxFailuresWithoutCapacityEvidenceDoNotRetrySmallerRequests() {
+        listOf(
+            EnrichmentEngineResult("{") to EnrichmentOutputReason.INCOMPLETE_JSON,
+            EnrichmentEngineResult("{\"parts\":trX", contextLimitReached = true) to
+                EnrichmentOutputReason.MALFORMED_JSON,
+        ).forEach { (response, reason) ->
+            val store = FakeStore(completedSource(capacityTestSegments(4)))
+            val factory = FakeEngineFactory(response = { response })
+            val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+            assertTrue(outcome is EnrichmentRunOutcome.Failure)
+            assertEquals(1, factory.generateCount)
+            assertEquals(0, store.completeCount)
+            assertEquals(reason.safeDetail, store.failed?.detail)
+        }
+    }
+
+    @Test
+    fun interruptionAfterExhaustionStopsBeforeRecoveryGeneration() {
+        val store = FakeStore(completedSource(capacityTestSegments(4)))
+        var interruption: EnrichmentInterruptionCause? = null
+        val factory = FakeEngineFactory(response = {
+            interruption = EnrichmentInterruptionCause.APP_HIDDEN
+            EnrichmentEngineResult("{", contextLimitReached = true)
+        })
+        val outcome = coordinator(store, factory, FakeGate(), { interruption }).processNight(NIGHT_ID)
+        assertTrue(outcome is EnrichmentRunOutcome.Failure)
+        assertEquals(EnrichmentFailureCode.APP_HIDDEN, (outcome as EnrichmentRunOutcome.Failure).code)
+        assertEquals(1, factory.generateCount)
+        assertEquals(0, store.completeCount)
     }
 
     @Test
@@ -422,6 +583,29 @@ class NightEnrichmentCoordinatorTest {
     }
 
     @Test
+    fun laterCaptureSyntaxFailurePersistsNoPartialEnrichment() {
+        val source = completedSource(listOf(
+            sourceSegment("session-a", sessionOrder = 0, text = "first dream source"),
+            sourceSegment("session-b", sessionOrder = 1, text = "second dream source"),
+        ))
+        val store = FakeStore(source)
+        var invocation = 0
+        val factory = FakeEngineFactory(response = {
+            invocation += 1
+            EnrichmentEngineResult(if (invocation == 1) validOutput() else "{")
+        })
+
+        val outcome = coordinator(store, factory, FakeGate()).processNight(NIGHT_ID)
+
+        assertTrue(outcome is EnrichmentRunOutcome.Failure)
+        assertEquals(EnrichmentOutputReason.INCOMPLETE_JSON.safeDetail, store.failed?.detail)
+        assertEquals(2, factory.generateCount)
+        assertEquals(0, store.completeCount)
+        assertNull(store.completed)
+        assertEquals(source, store.source)
+    }
+
+    @Test
     fun unavailableOperationGateFailsBeforeSourceReadAndReleasesNoLease() {
         val store = FakeStore(completedSource())
         val gate = FakeGate(available = false)
@@ -683,10 +867,8 @@ class NightEnrichmentCoordinatorTest {
     @Test
     fun foregroundLossDuringValidationWinsOverInvalidModelOutput() {
         val store = FakeStore(completedSource())
-        var generationReturned = false
-        var postGenerationChecks = 0
+        var interruption: EnrichmentInterruptionCause? = null
         val factory = FakeEngineFactory(response = {
-            generationReturned = true
             EnrichmentEngineResult("{")
         })
 
@@ -694,14 +876,12 @@ class NightEnrichmentCoordinatorTest {
             store = store,
             factory = factory,
             gate = FakeGate(),
-            interruptionCause = {
-                if (generationReturned && ++postGenerationChecks >= 3) {
-                    EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED
-                } else {
-                    null
-                }
-            },
-        ).processNight(NIGHT_ID)
+            interruptionCause = { interruption },
+        ).processNight(NIGHT_ID) { progress ->
+            if (progress.phase == EnrichmentOperationPhase.VALIDATING) {
+                interruption = EnrichmentInterruptionCause.SCREEN_OFF_OR_LOCKED
+            }
+        }
 
         assertTrue(outcome is EnrichmentRunOutcome.Failure)
         outcome as EnrichmentRunOutcome.Failure
@@ -866,6 +1046,23 @@ class NightEnrichmentCoordinatorTest {
         rawTranscriptReviewable = true,
         segments = segments,
     )
+
+    private fun capacityTestSegments(count: Int): List<NightTranscriptSegment> =
+        (0 until count).map { index ->
+            sourceSegment(
+                sessionId = "session-a",
+                sessionOrder = 0,
+                segmentIndex = index,
+                text = "garden ".repeat(20).trim(),
+            )
+        }
+
+    private fun requestAliases(request: EnrichmentModelRequest): List<String> =
+        Regex("s[0-9]+").findAll(request.userContent.lineSequence().first())
+            .map { it.value }.toList()
+
+    private fun outputCoveringRequest(request: EnrichmentModelRequest): String =
+        validOutput().replace("\"end\":\"s0\"", "\"end\":\"${requestAliases(request).last()}\"")
 
     private fun validOutput(): String =
         "{\"parts\":[{\"dream\":\"d0\",\"kind\":\"dream\",\"uncertain\":false," +

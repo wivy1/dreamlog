@@ -306,6 +306,88 @@ class EnrichmentDomainAndParserTest {
     }
 
     @Test
+    fun contextExhaustedFittingRequestSplitsIntoSmallerWholeSourceUnits() {
+        val segments = (0 until 5).map { index ->
+            segment(
+                "session-a", 0, index, index * 100L, (index + 1L) * 100L,
+                "rain ".repeat(16).trim(),
+            )
+        }
+        val source = input(*segments.toTypedArray())
+        val originalUnits = source.toEnrichmentSourceUnits()
+        assertEquals(5, originalUnits.size)
+        assertTrue(
+            EnrichmentPromptBuilder.build(source, 1).userContent.length <
+                MAX_ENRICHMENT_USER_CONTENT_CHARACTERS,
+        )
+        assertEquals(listOf(source), source.enrichmentRequestPartitions())
+
+        val partitions = source.smallerEnrichmentRequestPartitions()
+
+        assertEquals(listOf(3, 2), partitions.map { it.toEnrichmentSourceUnits().size })
+        assertEquals(source.segments, partitions.flatMap(OrderedNightTranscript::segments))
+        assertEquals(
+            originalUnits.map(EnrichmentSourceUnit::segments),
+            partitions.flatMap { it.toEnrichmentSourceUnits() }.map(EnrichmentSourceUnit::segments),
+        )
+        assertTrue(partitions.all {
+            EnrichmentPromptBuilder.build(it, 1).userContent.length <=
+                MAX_ENRICHMENT_USER_CONTENT_CHARACTERS
+        })
+        assertTrue(partitions.all { it.toEnrichmentSourceUnits().size < originalUnits.size })
+    }
+
+    @Test
+    fun smallerRequestsKeepAssociationStartsAndMergeReturnsCorrectionsAndNewDreams() {
+        val texts = listOf(
+            "THE FIRST DREAM WAS ON A TRAIN",
+            "THE SECOND DREAM WAS IN A LIBRARY",
+            "BACK IN THE FIRST DREAM THE TRAIN ENTERED A TUNNEL",
+            "CORRECTION THE FIRST DREAM HAD A BLUE TRAIN",
+            "ANOTHER DETAIL THE FIRST DREAM HAD A STATION",
+            "rain ".repeat(16).trim(),
+        )
+        val source = input(*texts.mapIndexed { index, text ->
+            segment("session-a", 0, index, index * 100L, (index + 1L) * 100L, text)
+        }.toTypedArray())
+        assertEquals(listOf(source), source.enrichmentRequestPartitions())
+
+        val partitions = source.smallerEnrichmentRequestPartitions()
+
+        assertEquals(listOf(0, 2, 3, 4), partitions.map { it.segments.first().segmentIndex })
+        assertEquals(source.segments, partitions.flatMap(OrderedNightTranscript::segments))
+        val results = partitions.map { partition ->
+            parse(
+                partition,
+                dream(start = "s0", end = "s${partition.toEnrichmentSourceUnits().lastIndex}"),
+            )
+        }
+        val merged = mergeCaptureEnrichments(source, partitions, results, 1)
+        assertEquals(2, merged.dreams.size)
+        assertEquals(listOf(0, 2, 3, 4, 5), merged.dreams.first().sourceSpans.flatMap { span ->
+            span.segmentIds.map(SourceSegmentId::segmentIndex)
+        })
+        assertEquals(listOf(1), merged.dreams.last().sourceSpans.flatMap { span ->
+            span.segmentIds.map(SourceSegmentId::segmentIndex)
+        })
+        assertTrue(merged.dreams.first().sourceSpans.any { it.role == DreamSourceRole.CORRECTION })
+        assertTrue(merged.dreams.first().sourceSpans.any { it.role == DreamSourceRole.ADDITION })
+    }
+
+    @Test
+    fun smallerRequestsNeverSplitAnIndivisibleSourceUnitOrProtectedCuePhrase() {
+        val phrase = "BACK IN THE FIRST DREAM".split(' ')
+        val source = input(*phrase.mapIndexed { index, word ->
+            segment("session-a", 0, index, index * 100L, (index + 1L) * 100L, word)
+        }.toTypedArray())
+        assertEquals(1, source.toEnrichmentSourceUnits().size)
+        assertTrue(source.smallerEnrichmentRequestPartitions().isEmpty())
+        assertTrue(input().smallerEnrichmentRequestPartitions().isEmpty())
+        val oversized = input(segment("session-a", 0, 0, 0L, 100L, "a".repeat(4_001)))
+        assertTrue(oversized.smallerEnrichmentRequestPartitions().isEmpty())
+    }
+
+    @Test
     fun artificialWithinCapturePartitionsMergeCueFreeMaterialAndRetainSourceCoverage() {
         val segments = listOf(
             segment("session-a", 0, 0, 0L, 100L, "I WALKED THROUGH RAIN"),
@@ -512,6 +594,77 @@ class EnrichmentDomainAndParserTest {
             ),
             merged.dreams.single().sourceSpans.map(EnrichedSourceSpan::role),
         )
+    }
+
+    @Test
+    fun repartitionedCorrectionsAndAdditionsKeepRolesUntilExplicitReset() {
+        val continuations = listOf(
+            "CORRECTION THE FIRST DREAM HAD A BLUE TRAIN" to DreamSourceRole.CORRECTION,
+            "ANOTHER DETAIL THE FIRST DREAM HAD A STATION" to DreamSourceRole.ADDITION,
+        )
+        continuations.forEach { (cueText, continuationRole) ->
+            listOf("return", "new-dream", "later-capture").forEach { reset ->
+                val initialTexts = listOf(
+                    "THE FIRST DREAM WAS ON A TRAIN " + "rain ".repeat(10).trim(),
+                    "$cueText " + "rain ".repeat(10).trim(),
+                    "trees ".repeat(16).trim(),
+                    "clouds ".repeat(16).trim(),
+                )
+                val resetTexts = when (reset) {
+                    "return" -> listOf(
+                        "THE SECOND DREAM WAS IN A LIBRARY",
+                        "BACK IN THE FIRST DREAM THE TRAIN WAS MOVING " + "rain ".repeat(10).trim(),
+                        "flowers ".repeat(16).trim(),
+                    )
+                    "new-dream" -> listOf(
+                        "THE SECOND DREAM WAS IN A LIBRARY " + "rain ".repeat(10).trim(),
+                        "flowers ".repeat(16).trim(),
+                    )
+                    else -> listOf("flowers ".repeat(16).trim(), "trees ".repeat(16).trim())
+                }
+                val segments = (initialTexts + resetTexts).mapIndexed { index, text ->
+                    val laterCapture = reset == "later-capture" && index >= initialTexts.size
+                    val localIndex = if (laterCapture) index - initialTexts.size else index
+                    segment(
+                        if (laterCapture) "session-b" else "session-a",
+                        if (laterCapture) 1 else 0,
+                        localIndex,
+                        localIndex * 100L,
+                        (localIndex + 1L) * 100L,
+                        text,
+                    )
+                }
+                val source = input(*segments.toTypedArray())
+                val units = source.toEnrichmentSourceUnits()
+                assertEquals(segments.size, units.size)
+                val unsplitParts = mutableListOf(dream(label = "d0", start = "s0", end = "s3"))
+                if (reset == "return") {
+                    unsplitParts += dream(label = "d1", start = "s4", end = "s4")
+                    unsplitParts += dream(label = "d0", start = "s5", end = "s6")
+                } else {
+                    unsplitParts += dream(
+                        label = if (reset == "later-capture") "d0" else "d1",
+                        start = "s4",
+                        end = "s5",
+                    )
+                }
+                val unsplit = parse(source, *unsplitParts.toTypedArray())
+                val partitions = units.map { unit -> input(*unit.segments.toTypedArray()) }
+                val results = partitions.map { partition ->
+                    parse(partition, dream(start = "s0", end = "s0"))
+                }
+                val merged = mergeCaptureEnrichments(source, partitions, results, 1)
+                fun rolesBySource(result: ValidatedEnrichment) = result.dreams
+                    .flatMap(EnrichedDreamDraft::sourceSpans)
+                    .flatMap { span -> span.segmentIds.map { it to span.role } }
+                    .sortedBy { source.ordinal(it.first) }
+                val expected = segments.mapIndexed { index, segment ->
+                    segment.id to if (index in 1..3) continuationRole else DreamSourceRole.NARRATIVE
+                }
+                assertEquals("Unsplit $continuationRole / $reset", expected, rolesBySource(unsplit))
+                assertEquals("Partitioned $continuationRole / $reset", expected, rolesBySource(merged))
+            }
+        }
     }
 
     @Test
@@ -1194,8 +1347,8 @@ class EnrichmentDomainAndParserTest {
         val source = input(segment("session-a", 0, 0, 0L, 100L, "private words"))
 
         assertEquals(
-            EnrichmentOutputReason.MALFORMED_JSON,
-            outputFailure(source, "{").reason,
+            "INCOMPLETE_JSON",
+            outputFailure(source, "{").reason.name,
         )
         assertEquals(
             EnrichmentOutputReason.WRONG_FIELDS,
@@ -1217,6 +1370,54 @@ class EnrichmentDomainAndParserTest {
             ).reason,
         )
         assertTrue(EnrichmentOutputReason.entries.none { it.safeDetail.contains("private words") })
+    }
+
+    @Test
+    fun parserDistinguishesEmptyWrappedTrailingAndDuplicateOutputWithoutExposingContent() {
+        val source = input()
+        val cases = listOf(
+            "" to "EMPTY_OUTPUT",
+            " \t\r\n" to "EMPTY_OUTPUT",
+            "```json\n{\"parts\":[]}\n```" to "LEADING_CONTENT",
+            "Here is private-output-marker: {\"parts\":[]}" to "LEADING_CONTENT",
+            "{\"parts\":[]} private-output-marker" to "TRAILING_CONTENT",
+            "{\"parts\":[]}{\"parts\":[]}" to "TRAILING_CONTENT",
+            "{\"private-output-marker\":[],\"private-output-marker\":[]}" to "DUPLICATE_FIELD",
+            "{\"parts\":[{\"dream\":\"d0\",\"dream\":\"d1\"}]}" to "DUPLICATE_FIELD",
+        )
+        cases.forEach { (output, reason) ->
+            val failure = outputFailure(source, output)
+            assertEquals(reason, failure.reason.name)
+            assertEquals(failure.reason.safeDetail, failure.message)
+            assertFalse(failure.message.orEmpty().contains("private-output-marker"))
+        }
+        assertTrue(EnrichmentOutputParser.parse(" \n{\"parts\":[]}\t", source, 1).dreams.isEmpty())
+    }
+
+    @Test
+    fun parserDistinguishesIncompleteJsonFromInvalidSyntaxBeforeTheEnd() {
+        val source = input()
+        val incomplete = listOf(
+            "{", "{\"parts\"", "{\"parts\":", "{\"parts\":[", "{\"parts\":[]",
+            "{\"parts\":[],", "{\"parts\":[{", "{\"parts\":[true,",
+            "{\"parts\":tr", "{\"parts\":fals", "{\"parts\":nul",
+            "{\"parts\":\"private-output-marker", "{\"parts\":\"\\",
+            "{\"parts\":\"\\u", "{\"parts\":\"\\u12",
+            "{\"parts\":-", "{\"parts\":1.", "{\"parts\":1e", "{\"parts\":1e+",
+        )
+        incomplete.forEach { output ->
+            assertEquals("INCOMPLETE_JSON", outputFailure(source, output).reason.name)
+        }
+        val malformed = listOf(
+            "{\"parts\":trX", "{\"parts\":faX", "{\"parts\":nuX",
+            "{\"parts\":\"\\q", "{\"parts\":\"\\uX", "{\"parts\":\"\\u12X",
+            "{\"parts\":\"line\nbreak", "{\"parts\":1.X", "{\"parts\":1eX",
+            "{\"parts\":1e+X", "{\"parts\":-X", "{\"parts\":[,", "{\"parts\":[] X",
+            "{\"parts\":[],}", "{\"parts\":[true,]}",
+        )
+        malformed.forEach { output ->
+            assertEquals(EnrichmentOutputReason.MALFORMED_JSON, outputFailure(source, output).reason)
+        }
     }
 
     @Test

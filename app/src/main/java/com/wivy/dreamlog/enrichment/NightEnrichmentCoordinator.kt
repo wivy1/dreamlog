@@ -48,6 +48,7 @@ data class EnrichmentEngineMetadata(
 
 data class EnrichmentEngineResult(
     val rawJsonObject: String,
+    val contextLimitReached: Boolean = false,
 )
 
 class EnrichmentInputTooLargeException : IllegalArgumentException(
@@ -717,7 +718,7 @@ class NightEnrichmentCoordinator(
                 )
             } else {
                 val captureInputs = try {
-                    requestPartitioner(input)
+                    requestPartitioner(input).toMutableList()
                 } catch (_: EnrichmentInputTooLargeException) {
                     interruptionFailure(
                         nightId = nightId,
@@ -750,7 +751,7 @@ class NightEnrichmentCoordinator(
                 val requests = try {
                     captureInputs.map { capture ->
                         EnrichmentPromptBuilder.build(capture, claim.attempt)
-                    }
+                    }.toMutableList()
                 } catch (_: EnrichmentInputTooLargeException) {
                     interruptionFailure(
                         nightId = nightId,
@@ -821,7 +822,7 @@ class NightEnrichmentCoordinator(
                     claim = claim,
                     onProgress = onProgress,
                 )?.let { return it }
-                val responses = try {
+                val captureResults = try {
                     publish(
                         onProgress,
                         operationState.advance(
@@ -830,8 +831,9 @@ class NightEnrichmentCoordinator(
                             true,
                         ),
                     )
-                    val generated = mutableListOf<EnrichmentEngineResult>()
-                    for (request in requests) {
+                    val validatedCaptures = mutableListOf<ValidatedEnrichment>()
+                    var requestIndex = 0
+                    while (requestIndex < requests.size) {
                         val beforeGeneration = interruptionFailure(
                             nightId = nightId,
                             rawFallbackAvailable = true,
@@ -839,7 +841,8 @@ class NightEnrichmentCoordinator(
                             onProgress = onProgress,
                         )
                         if (beforeGeneration != null) return beforeGeneration
-                        generated += engine.generate(request)
+                        val capture = captureInputs[requestIndex]
+                        val response = engine.generate(requests[requestIndex])
                         val afterGeneration = interruptionFailure(
                             nightId = nightId,
                             rawFallbackAvailable = true,
@@ -847,8 +850,65 @@ class NightEnrichmentCoordinator(
                             onProgress = onProgress,
                         )
                         if (afterGeneration != null) return afterGeneration
+                        val validatedCapture = try {
+                            EnrichmentOutputParser.parse(
+                                outputJson = response.rawJsonObject,
+                                input = capture,
+                                expectedAttempt = claim.attempt,
+                            )
+                        } catch (failure: EnrichmentOutputException) {
+                            if (
+                                !response.contextLimitReached || failure.reason !in setOf(
+                                    EnrichmentOutputReason.EMPTY_OUTPUT,
+                                    EnrichmentOutputReason.INCOMPLETE_JSON,
+                                )
+                            ) {
+                                throw failure
+                            }
+                            val smaller = capture.smallerEnrichmentRequestPartitions()
+                            if (smaller.isEmpty()) {
+                                throw EnrichmentOutputException(
+                                    EnrichmentOutputReason.CONTEXT_LIMIT_REACHED,
+                                )
+                            }
+                            val smallerRequests = smaller.map { child ->
+                                EnrichmentPromptBuilder.build(child, claim.attempt)
+                            }
+                            // Replace only the exhausted request. Keep successful leaves in order
+                            // so references can resolve across all chunks at the one final merge.
+                            captureInputs.removeAt(requestIndex)
+                            captureInputs.addAll(requestIndex, smaller)
+                            requests.removeAt(requestIndex)
+                            requests.addAll(requestIndex, smallerRequests)
+                            continue
+                        }
+                        validatedCaptures += validatedCapture
+                        requestIndex += 1
                     }
-                    generated
+                    validatedCaptures
+                } catch (failure: EnrichmentOutputException) {
+                    publish(
+                        onProgress,
+                        operationState.advance(
+                            EnrichmentOperationPhase.VALIDATING,
+                            claim.attempt,
+                            true,
+                        ),
+                    )
+                    interruptionFailure(
+                        nightId = nightId,
+                        rawFallbackAvailable = true,
+                        claim = claim,
+                        onProgress = onProgress,
+                    )?.let { return it }
+                    return fail(
+                        nightId,
+                        EnrichmentFailureCode.OUTPUT_INVALID,
+                        true,
+                        claim,
+                        onProgress,
+                        failure.reason.safeDetail,
+                    )
                 } catch (_: EnrichmentInputTooLargeException) {
                     interruptionFailure(
                         nightId = nightId,
@@ -895,13 +955,6 @@ class NightEnrichmentCoordinator(
                     ),
                 )
                 try {
-                    val captureResults = captureInputs.zip(responses).map { (capture, response) ->
-                        EnrichmentOutputParser.parse(
-                            outputJson = response.rawJsonObject,
-                            input = capture,
-                            expectedAttempt = claim.attempt,
-                        )
-                    }
                     mergeCaptureEnrichments(
                         input = input,
                         captureInputs = captureInputs,

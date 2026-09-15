@@ -441,14 +441,16 @@ private class StrictJsonParser(private val source: String) {
 
     fun parse(): JsonValue {
         skipWhitespace()
+        if (index == source.length) invalid(EnrichmentOutputReason.EMPTY_OUTPUT)
         val value = parseValue(depth = 0)
         skipWhitespace()
-        if (index != source.length) malformed()
+        if (index != source.length) invalid(EnrichmentOutputReason.TRAILING_CONTENT)
         return value
     }
 
     private fun parseValue(depth: Int): JsonValue {
-        if (depth > MAX_DEPTH || index >= source.length) malformed()
+        if (depth > MAX_DEPTH) malformed()
+        if (index >= source.length) incomplete()
         return when (source[index]) {
             '{' -> parseObject(depth + 1)
             '[' -> parseArray(depth + 1)
@@ -457,7 +459,7 @@ private class StrictJsonParser(private val source: String) {
             'f' -> parseLiteral("false", JsonBoolean(false))
             'n' -> parseLiteral("null", JsonNull)
             '-', in '0'..'9' -> JsonNumber(parseNumber())
-            else -> malformed()
+            else -> if (depth == 0) invalid(EnrichmentOutputReason.LEADING_CONTENT) else malformed()
         }
     }
 
@@ -467,9 +469,10 @@ private class StrictJsonParser(private val source: String) {
         val values = linkedMapOf<String, JsonValue>()
         if (takeIfPresent('}')) return JsonObject(values)
         while (true) {
-            if (index >= source.length || source[index] != '"') malformed()
+            if (index >= source.length) incomplete()
+            if (source[index] != '"') malformed()
             val name = parseString()
-            if (values.containsKey(name)) malformed()
+            if (values.containsKey(name)) invalid(EnrichmentOutputReason.DUPLICATE_FIELD)
             skipWhitespace()
             expect(':')
             skipWhitespace()
@@ -505,7 +508,7 @@ private class StrictJsonParser(private val source: String) {
             when {
                 character == '"' -> return result.toString()
                 character == '\\' -> {
-                    if (index >= source.length) malformed()
+                    if (index >= source.length) incomplete()
                     when (val escaped = source[index++]) {
                         '"', '\\', '/' -> result.append(escaped)
                         'b' -> result.append('\b')
@@ -522,13 +525,13 @@ private class StrictJsonParser(private val source: String) {
                 else -> result.append(character)
             }
         }
-        malformed()
+        incomplete()
     }
 
     private fun parseUnicodeEscape(): Char {
-        if (index + 4 > source.length) malformed()
-        val raw = source.substring(index, index + 4)
-        if (!HEX.matches(raw)) malformed()
+        val raw = source.substring(index, minOf(index + 4, source.length))
+        if (raw.any { it !in HEX_DIGITS }) malformed()
+        if (raw.length < 4) incomplete()
         index += 4
         return raw.toInt(16).toChar()
     }
@@ -536,7 +539,7 @@ private class StrictJsonParser(private val source: String) {
     private fun parseNumber(): String {
         val start = index
         if (source[index] == '-') index += 1
-        if (index >= source.length) malformed()
+        if (index >= source.length) incomplete()
         if (source[index] == '0') {
             index += 1
         } else {
@@ -547,14 +550,18 @@ private class StrictJsonParser(private val source: String) {
             index += 1
             val fractionStart = index
             while (index < source.length && source[index].isDigit()) index += 1
-            if (fractionStart == index) malformed()
+            if (fractionStart == index) {
+                if (index >= source.length) incomplete() else malformed()
+            }
         }
         if (index < source.length && source[index] in setOf('e', 'E')) {
             index += 1
             if (index < source.length && source[index] in setOf('+', '-')) index += 1
             val exponentStart = index
             while (index < source.length && source[index].isDigit()) index += 1
-            if (exponentStart == index) malformed()
+            if (exponentStart == index) {
+                if (index >= source.length) incomplete() else malformed()
+            }
         }
         return source.substring(start, index)
     }
@@ -563,7 +570,10 @@ private class StrictJsonParser(private val source: String) {
         literal: String,
         value: T,
     ): T {
-        if (!source.startsWith(literal, index)) malformed()
+        literal.forEachIndexed { offset, expected ->
+            if (index + offset >= source.length) incomplete()
+            if (source[index + offset] != expected) malformed()
+        }
         index += literal.length
         return value
     }
@@ -573,7 +583,8 @@ private class StrictJsonParser(private val source: String) {
     }
 
     private fun expect(expected: Char) {
-        if (index >= source.length || source[index] != expected) malformed()
+        if (index >= source.length) incomplete()
+        if (source[index] != expected) malformed()
         index += 1
     }
 
@@ -583,12 +594,16 @@ private class StrictJsonParser(private val source: String) {
         return true
     }
 
-    private fun malformed(): Nothing =
-        throw EnrichmentOutputException(EnrichmentOutputReason.MALFORMED_JSON)
+    private fun malformed(): Nothing = invalid(EnrichmentOutputReason.MALFORMED_JSON)
+
+    private fun incomplete(): Nothing = invalid(EnrichmentOutputReason.INCOMPLETE_JSON)
+
+    private fun invalid(reason: EnrichmentOutputReason): Nothing =
+        throw EnrichmentOutputException(reason)
 
     private companion object {
         const val MAX_DEPTH = 64
         val JSON_WHITESPACE = setOf(' ', '\t', '\n', '\r')
-        val HEX = Regex("[0-9a-fA-F]{4}")
+        const val HEX_DIGITS = "0123456789abcdefABCDEF"
     }
 }

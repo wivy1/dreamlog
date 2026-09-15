@@ -172,11 +172,12 @@ internal class LiteRtEnrichmentEngine(
                 },
             )
             val responseText = response.contents.toString()
+            val conversationTokenCount = activeConversation.getTokenCount()
             lastMetrics = LiteRtGenerationMetrics(
                 engineInitializationMillis = initializationMillis,
                 generationMillis = generationMillis,
                 renderedPromptCharacters = renderedCharacters,
-                conversationTokenCount = activeConversation.getTokenCount(),
+                conversationTokenCount = conversationTokenCount,
                 benchmark = if (collectBenchmarkMetrics) {
                     runCatching(activeConversation::getBenchmarkInfo).getOrNull()
                 } else {
@@ -185,6 +186,8 @@ internal class LiteRtEnrichmentEngine(
             )
             EnrichmentEngineResult(
                 rawJsonObject = responseText,
+                // LiteRT-LM can return partial text normally when its total-token limit is reached.
+                contextLimitReached = conversationTokenCount >= MAX_TOTAL_TOKENS,
             )
         }
     }
@@ -199,7 +202,7 @@ internal class LiteRtEnrichmentEngine(
 private fun nanosToMillis(nanos: Long): Long = nanos / 1_000_000L
 
 private const val ENGINE_ID = "dreamlog-litert-enrichment"
-internal const val ENRICHMENT_ENGINE_VERSION = "12"
+internal const val ENRICHMENT_ENGINE_VERSION = "13"
 private const val RUNTIME_ID = "litert-lm-kotlin"
 private const val RUNTIME_VERSION = "0.14.0"
 internal const val MODEL_CONTEXT_TOKENS = 2_048

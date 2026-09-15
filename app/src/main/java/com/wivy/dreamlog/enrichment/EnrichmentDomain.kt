@@ -230,8 +230,26 @@ internal fun OrderedNightTranscript.capturePartitions(): List<OrderedNightTransc
  * intact so the caller can report the precise terminal failure.
  */
 internal fun OrderedNightTranscript.enrichmentRequestPartitions(): List<OrderedNightTranscript> =
+    partitionEnrichmentRequests(maxSourceUnits = Int.MAX_VALUE, forceAssociationStarts = false)
+
+/** A failed request may shrink only at whole source units; an indivisible request cannot retry. */
+internal fun OrderedNightTranscript.smallerEnrichmentRequestPartitions(): List<OrderedNightTranscript> {
+    val unitCount = toEnrichmentSourceUnits().size
+    if (unitCount <= 1) return emptyList()
+    return partitionEnrichmentRequests(
+        maxSourceUnits = unitCount / 2 + unitCount % 2,
+        forceAssociationStarts = true,
+    )
+}
+
+private fun OrderedNightTranscript.partitionEnrichmentRequests(
+    maxSourceUnits: Int,
+    forceAssociationStarts: Boolean,
+): List<OrderedNightTranscript> =
     capturePartitions().flatMap { capture ->
-        if (capture.fitsEnrichmentRequest()) return@flatMap listOf(capture)
+        if (!forceAssociationStarts && capture.fitsEnrichmentRequest()) {
+            return@flatMap listOf(capture)
+        }
 
         val units = capture.toEnrichmentSourceUnits()
         if (units.isEmpty()) {
@@ -263,7 +281,7 @@ internal fun OrderedNightTranscript.enrichmentRequestPartitions(): List<OrderedN
                 }
 
                 val candidate = current + unit
-                if (candidate.fitsEnrichmentRequest(nightId)) {
+                if (candidate.size <= maxSourceUnits && candidate.fitsEnrichmentRequest(nightId)) {
                     current += unit
                 } else {
                     flush()
@@ -468,7 +486,11 @@ internal fun mergeCaptureEnrichments(
         result.dreams.forEachIndexed { index, dream ->
             if (index == 0 && continuationTarget != null) {
                 mergedDreams[continuationTarget] =
-                    mergedDreams[continuationTarget].appendContinuation(dream)
+                    mergedDreams[continuationTarget].appendContinuation(
+                        continuation = dream,
+                        inheritSourceRole = firstCue == EnrichmentCue.NONE ||
+                            firstCue == EnrichmentCue.UNCERTAIN,
+                    )
                 lastMappedDreamIndex = continuationTarget
             } else {
                 mergedDreams += dream.copy(order = mergedDreams.size)
@@ -497,19 +519,31 @@ private data class CaptureIdentity(
 
 private fun EnrichedDreamDraft.appendContinuation(
     continuation: EnrichedDreamDraft,
-): EnrichedDreamDraft = copy(
-    kind = if (
-        kind == EnrichedDreamKind.DREAM || continuation.kind == EnrichedDreamKind.DREAM
-    ) {
-        EnrichedDreamKind.DREAM
+    inheritSourceRole: Boolean,
+): EnrichedDreamDraft {
+    val priorRole = sourceSpans.last().role
+    val inheritedSpanCount = if (inheritSourceRole && priorRole != DreamSourceRole.NARRATIVE) {
+        continuation.sourceSpans.takeWhile { it.role == DreamSourceRole.NARRATIVE }.size
     } else {
-        EnrichedDreamKind.FRAGMENT
-    },
-    generatedTitle = generatedTitle ?: continuation.generatedTitle,
-    generatedText = "$generatedText ${continuation.generatedText}".trim(),
-    uncertain = uncertain || continuation.uncertain,
-    sourceSpans = (sourceSpans + continuation.sourceSpans).coalesceAdjacentSourceSpans(),
-)
+        0
+    }
+    val continuationSpans = continuation.sourceSpans.mapIndexed { index, span ->
+        if (index < inheritedSpanCount) span.copy(role = priorRole) else span
+    }
+    return copy(
+        kind = if (
+            kind == EnrichedDreamKind.DREAM || continuation.kind == EnrichedDreamKind.DREAM
+        ) {
+            EnrichedDreamKind.DREAM
+        } else {
+            EnrichedDreamKind.FRAGMENT
+        },
+        generatedTitle = generatedTitle ?: continuation.generatedTitle,
+        generatedText = "$generatedText ${continuation.generatedText}".trim(),
+        uncertain = uncertain || continuation.uncertain,
+        sourceSpans = (sourceSpans + continuationSpans).coalesceAdjacentSourceSpans(),
+    )
+}
 
 private fun List<EnrichedSourceSpan>.coalesceAdjacentSourceSpans(): List<EnrichedSourceSpan> =
     fold(mutableListOf()) { result, span ->
@@ -534,6 +568,12 @@ private fun List<EnrichedSourceSpan>.coalesceAdjacentSourceSpans(): List<Enriche
 internal enum class EnrichmentOutputReason(val safeDetail: String) {
     OUTPUT_TOO_LARGE("The local model returned more output than the schema permits."),
     MALFORMED_JSON("The local model returned malformed JSON."),
+    EMPTY_OUTPUT("The local model returned no JSON output."),
+    INCOMPLETE_JSON("The local model returned incomplete JSON."),
+    CONTEXT_LIMIT_REACHED("The local model ran out of space before finishing its response."),
+    LEADING_CONTENT("The local model returned non-JSON content before its result."),
+    TRAILING_CONTENT("The local model returned extra content after its JSON result."),
+    DUPLICATE_FIELD("The local model returned duplicate JSON fields."),
     WRONG_FIELDS("The local model returned missing or unknown fields."),
     INVALID_FIELD_TYPE("The local model returned a field with the wrong type."),
     EXPECTED_OBJECT("The local model returned a non-object root or part."),

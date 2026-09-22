@@ -23,6 +23,108 @@ class NightRepositoryTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun noWakeNightDisappearsAfterEndingAndStaysOutOfHistoryAfterReload() {
+        val fixture = fixture("empty-night-history")
+        var now = 1_000L
+        val journal = journal(fixture.journalRoot) { now }
+        val repository = fixture.repository(journal)
+        journal.beginNight("empty-night", "2026-09-22", now)
+        assertEquals(1, repository.reconcile("empty-night").nights.size)
+
+        now = 2_000L
+        journal.endNight(reason = "owner_stopped", interrupted = false, endedAtEpochMillis = now)
+        assertTrue(repository.reconcile(null).nights.isEmpty())
+        assertTrue(fixture.repository(journal).reconcile(null).nights.isEmpty())
+        // Keep operational evidence; omitting an empty night must not delete stored graphs.
+        assertEquals(NightCaptureState.ENDED, fixture.dao.readNight("empty-night")?.night?.captureState)
+    }
+
+    @Test
+    fun previouslySavedEmptyNightsAreOmittedWithoutHidingCaptureOrFailureEvidence() {
+        val fixture = fixture("old-empty-night-history")
+        val empty = endedNightForDeletion("empty-night", 1_000L).copy(
+            reportedSessionCount = 0, rawAudioState = RawAudioState.NONE,
+            transcriptionState = ProcessingState.NOT_STARTED,
+            enrichmentState = ProcessingState.WAITING_FOR_TRANSCRIPTION,
+        )
+        val preserved = listOf(
+            empty.copy(nightId = "active", captureState = NightCaptureState.ACTIVE, endedAtEpochMillis = null),
+            empty.copy(nightId = "interrupted", captureState = NightCaptureState.INTERRUPTED, interrupted = true),
+            empty.copy(nightId = "reported-capture", reportedSessionCount = 1),
+            empty.copy(nightId = "incomplete-capture", reportedIncompleteSessionCount = 1),
+            empty.copy(nightId = "import-warning", importWarning = "Missing journal evidence."),
+            empty.copy(nightId = "silenced", hadMicrophoneSilencing = true),
+            empty.copy(nightId = "gap", hadAudioGap = true),
+            empty.copy(nightId = "transcribing", transcriptionState = ProcessingState.RUNNING),
+            empty.copy(nightId = "failed", transcriptionState = ProcessingState.FAILED),
+            empty.copy(nightId = "enriching", enrichmentState = ProcessingState.RUNNING),
+            empty.copy(nightId = "enrichment-failed", enrichmentFailure = "Interrupted processing."),
+            empty.copy(nightId = "wake"),
+            empty.copy(nightId = "session-event"),
+            empty.copy(nightId = "session"),
+        )
+        (preserved + empty + empty.copy(nightId = "complete-empty", transcriptionState = ProcessingState.COMPLETE))
+            .forEach { fixture.dao.seed(it, emptyList(), emptyList()) }
+        fixture.dao.upsertCaptureGraph(preserved.single { it.nightId == "wake" }, emptyList(), listOf(
+            NightEventEntity("wake", "wake-event", null, 1_010L, 0, "wake_detected", ""),
+        ))
+        fixture.dao.upsertCaptureGraph(preserved.single { it.nightId == "session-event" }, emptyList(), listOf(
+            NightEventEntity("session-event", "session-event", "captured-session", 1_010L, 0, "session_started", ""),
+        ))
+        fixture.dao.seed(preserved.single { it.nightId == "session" },
+            retainedSessionForDeletion("session", "captured-session", "capture.wav").copy(audioState = AudioEvidenceState.DELETED))
+
+        assertEquals(preserved.map { it.nightId }.toSet(),
+            fixture.repository(journal(fixture.journalRoot) { 2_000L }).readHistory().map { it.night.nightId }.toSet())
+        assertEquals(preserved.size + 2, fixture.dao.readHistory().size)
+    }
+
+    @Test
+    fun unindexedAudioArtifactsKeepOtherwiseEmptyNightsVisible() {
+        val fixture = fixture("empty-night-artifacts")
+        val night = endedNightForDeletion("empty-night", 1_000L).copy(
+            reportedSessionCount = 0, rawAudioState = RawAudioState.NONE,
+            transcriptionState = ProcessingState.NOT_STARTED,
+            enrichmentState = ProcessingState.WAITING_FOR_TRANSCRIPTION,
+        )
+        fixture.dao.seed(night, emptyList(), emptyList())
+        val repository = fixture.repository(journal(fixture.journalRoot) { 2_000L })
+        val directory = File(fixture.audioRoot, night.nightId).apply { mkdirs() }
+        assertTrue(repository.readHistory().isEmpty())
+        listOf("capture.wav", "capture.wav.part", "capture.properties", "unknown-file").forEach { name ->
+            val artifact = File(directory, name).apply { writeText("retained evidence") }
+            assertEquals(name, 1, repository.readHistory().size)
+            assertTrue(artifact.delete())
+        }
+    }
+
+    @Test
+    fun acceptedOrUnreadableWakeCandidatesAndDeletedDreamsRemainVisible() {
+        val fixture = fixture("empty-night-wake-evidence")
+        val empty = endedNightForDeletion("rejected", 1_000L).copy(
+            reportedSessionCount = 0, rawAudioState = RawAudioState.NONE,
+            transcriptionState = ProcessingState.COMPLETE,
+            enrichmentState = ProcessingState.WAITING_FOR_TRANSCRIPTION,
+        )
+        mapOf("rejected" to "accepted=ZmFsc2U", "accepted" to "accepted=dHJ1ZQ", "unreadable" to "broken")
+            .forEach { (nightId, attributes) ->
+                fixture.dao.upsertCaptureGraph(empty.copy(nightId = nightId), emptyList(), listOf(
+                    NightEventEntity(nightId, "candidate", null, 1_010L, 0, "wake_candidate_episode", attributes),
+                ))
+            }
+        fixture.dao.seed(empty.copy(nightId = "deleted-dream"), emptyList(), listOf(
+            DreamWithSourceSpans(
+                DreamEntity("dream", "deleted-dream", "run", 0, DreamKind.DREAM, false,
+                    null, "Synthetic text", null, "Synthetic text", false, null, 1_020L),
+                emptyList(),
+            ),
+        ))
+        val records = fixture.repository(journal(fixture.journalRoot) { 2_000L }).readHistory()
+        assertEquals(setOf("accepted", "unreadable", "deleted-dream"), records.map { it.night.nightId }.toSet())
+        assertTrue(records.single { it.night.nightId == "deleted-dream" }.dreams.isEmpty())
+    }
+
+    @Test
     fun reconciliationLoadsHistoryGraphOnceAfterUpdatingFinalizedNights() {
         val fixture = fixture("reconcile-history-loads")
         val finalizedNights = listOf(
@@ -398,7 +500,7 @@ class NightRepositoryTest {
     }
 
     @Test
-    fun reconcileKeepsCrossMidnightSessionWithExplicitParentAndSortsNewestFirst() {
+    fun reconcileKeepsCrossMidnightSessionWithExplicitParentAndOmitsEmptyNewerNight() {
         val fixture = fixture("ordering")
         val olderStart = epoch("2026-07-30T04:55:00Z")
         val crossMidnightSessionStart = epoch("2026-07-30T05:05:00Z")
@@ -455,7 +557,7 @@ class NightRepositoryTest {
         assertEquals(2, first.importedNightCount)
         assertEquals(2, first.acknowledgedNightCount)
         assertEquals(
-            listOf(NEWER_NIGHT_ID, OLDER_NIGHT_ID),
+            listOf(OLDER_NIGHT_ID),
             first.nights.map { it.night.nightId },
         )
         val older = first.nights.single { it.night.nightId == OLDER_NIGHT_ID }
@@ -477,7 +579,7 @@ class NightRepositoryTest {
         assertEquals(0, second.importedNightCount)
         assertEquals(0, second.acknowledgedNightCount)
         assertEquals(
-            listOf(NEWER_NIGHT_ID, OLDER_NIGHT_ID),
+            listOf(OLDER_NIGHT_ID),
             second.nights.map { it.night.nightId },
         )
     }
@@ -550,11 +652,9 @@ class NightRepositoryTest {
             endedAtEpochMillis = endedAt,
         )
 
-        val record = fixture.repository(journal)
-            .reconcile(runtimeActiveNightId = null)
-            .nights
-            .single()
-
+        val repository = fixture.repository(journal)
+        assertTrue(repository.reconcile(runtimeActiveNightId = null).nights.isEmpty())
+        val record = requireNotNull(repository.readNight(EFFECTIVE_SILENCING_NIGHT_ID))
         assertFalse(record.night.hadMicrophoneSilencing)
     }
 
@@ -862,7 +962,8 @@ class NightRepositoryTest {
         assertEquals(1, first.importedNightCount)
         assertEquals(1, first.acknowledgedNightCount)
         assertEquals(1, first.warningCount)
-        assertEquals(listOf(VALID_END_NIGHT_ID), first.nights.map { it.night.nightId })
+        assertTrue(first.nights.isEmpty())
+        assertEquals(NightCaptureState.ENDED, repository.readNight(VALID_END_NIGHT_ID)?.night?.captureState)
         assertFalse(endFile(fixture.journalRoot, VALID_END_NIGHT_ID).exists())
         assertTrue(endFile(fixture.journalRoot, CORRUPT_END_NIGHT_ID).isFile)
         assertTrue(eventFile(fixture.journalRoot, CORRUPT_END_NIGHT_ID).isFile)
@@ -872,7 +973,7 @@ class NightRepositoryTest {
         assertEquals(0, repeated.importedNightCount)
         assertEquals(0, repeated.acknowledgedNightCount)
         assertEquals(1, repeated.warningCount)
-        assertEquals(listOf(VALID_END_NIGHT_ID), repeated.nights.map { it.night.nightId })
+        assertTrue(repeated.nights.isEmpty())
     }
 
     @Test

@@ -163,7 +163,38 @@ class NightRepository(
 
     @Synchronized
     fun readHistory(): List<NightRecord> =
-        dao.readHistory().map(::toRecord)
+        dao.readHistory().filterNot(::isEmptyEndedNight).map(::toRecord)
+
+    // Retain the stored graph for recovery, but omit uneventful nights from history and its queues.
+    private fun isEmptyEndedNight(source: NightWithDetails): Boolean {
+        val night = source.night
+        if (
+            night.captureState != NightCaptureState.ENDED || night.endedAtEpochMillis == null ||
+            night.interrupted || night.hadMicrophoneSilencing || night.hadAudioGap ||
+            night.importWarning != null || night.reportedSessionCount != 0 ||
+            night.reportedIncompleteSessionCount != 0 || night.rawAudioState != RawAudioState.NONE ||
+            night.transcriptionState !in setOf(ProcessingState.NOT_STARTED, ProcessingState.COMPLETE) ||
+            night.enrichmentState != ProcessingState.WAITING_FOR_TRANSCRIPTION ||
+            night.transcriptionFailure != null || night.enrichmentFailure != null ||
+            source.sessions.isNotEmpty() || source.transcripts.isNotEmpty() ||
+            source.enrichmentRuns.isNotEmpty() || source.dreams.isNotEmpty()
+        ) return false
+        if (source.events.any { event ->
+                event.sessionId != null || event.type in setOf(
+                    "wake_detected", "session_started", "session_finalized", "capture_failure",
+                    "capture_recovered", "journal_import_warning", "safety_stop",
+                ) || (event.type == "wake_candidate_episode" && runCatching {
+                    decodeAttributes(event.encodedAttributes)["accepted"] != "false"
+                }.getOrDefault(true))
+            }
+        ) return false
+
+        // Partial, unindexed, or unreadable artifacts are still evidence, even without Room sessions.
+        return runCatching {
+            val directory = canonicalNightAudioDirectory(night.nightId)
+            !directory.exists() || directory.listFiles()?.isEmpty() == true
+        }.getOrDefault(false)
+    }
 
     @Synchronized
     fun readNight(nightId: String): NightRecord? =

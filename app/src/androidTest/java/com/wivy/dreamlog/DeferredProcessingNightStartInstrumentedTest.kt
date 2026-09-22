@@ -157,6 +157,15 @@ class DeferredProcessingNightStartInstrumentedTest {
                         assertEquals(previousFiles, fileHashes(audioDirectory))
                         assertEquals(readyTranscription, transcription.value)
                         assertEquals(readyEnrichment, enrichment.value)
+                        assertEquals(listOf(nightId), repository.readHistory().map { it.night.nightId })
+                        // The just-ended empty night must stay absent after a real Activity reload.
+                        // Remove only our synthetic backlog so the empty History UI is observable.
+                        assertTrue(repository.deleteWholeNight(nightId))
+                        scenario.recreate()
+                        await("$pending empty night omitted from History after reload") { visibleLabel("No nights yet.") }
+                        assertTrue(repository.readHistory().isEmpty())
+                        assertEquals(NightCaptureState.ENDED,
+                            database.nightDao().readNight(startedNightId!!)?.night?.captureState)
                     }
                 } finally {
                     // Only the night created by this click is eligible for service cleanup.

@@ -170,7 +170,7 @@ class NightRepository(
         val night = source.night
         if (
             night.captureState != NightCaptureState.ENDED || night.endedAtEpochMillis == null ||
-            night.interrupted || night.hadMicrophoneSilencing || night.hadAudioGap ||
+            night.interrupted || night.hadMicrophoneSilencing ||
             night.importWarning != null || night.reportedSessionCount != 0 ||
             night.reportedIncompleteSessionCount != 0 || night.rawAudioState != RawAudioState.NONE ||
             night.transcriptionState !in setOf(ProcessingState.NOT_STARTED, ProcessingState.COMPLETE) ||

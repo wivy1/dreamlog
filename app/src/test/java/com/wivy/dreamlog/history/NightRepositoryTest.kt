@@ -54,7 +54,6 @@ class NightRepositoryTest {
             empty.copy(nightId = "incomplete-capture", reportedIncompleteSessionCount = 1),
             empty.copy(nightId = "import-warning", importWarning = "Missing journal evidence."),
             empty.copy(nightId = "silenced", hadMicrophoneSilencing = true),
-            empty.copy(nightId = "gap", hadAudioGap = true),
             empty.copy(nightId = "transcribing", transcriptionState = ProcessingState.RUNNING),
             empty.copy(nightId = "failed", transcriptionState = ProcessingState.FAILED),
             empty.copy(nightId = "enriching", enrichmentState = ProcessingState.RUNNING),
@@ -122,6 +121,23 @@ class NightRepositoryTest {
         val records = fixture.repository(journal(fixture.journalRoot) { 2_000L }).readHistory()
         assertEquals(setOf("accepted", "unreadable", "deleted-dream"), records.map { it.night.nightId }.toSet())
         assertTrue(records.single { it.night.nightId == "deleted-dream" }.dreams.isEmpty())
+    }
+
+    @Test
+    fun listeningGapsWithoutAnyWakeOrRecordingDoNotCreateHistoryWork() {
+        val fixture = fixture("empty-night-listening-gaps")
+        val night = endedNightForDeletion("empty-night", 1_000L).copy(
+            reportedSessionCount = 0, rawAudioState = RawAudioState.NONE, hadAudioGap = true,
+            transcriptionState = ProcessingState.NOT_STARTED,
+            enrichmentState = ProcessingState.WAITING_FOR_TRANSCRIPTION,
+        )
+        val event = NightEventEntity(night.nightId, "gap", null, 1_010L, 0, "audio_gap", "")
+        fixture.dao.upsertCaptureGraph(night, emptyList(), listOf(event))
+        val repository = fixture.repository(journal(fixture.journalRoot) { 2_000L })
+
+        assertTrue(repository.readHistory().isEmpty())
+        assertEquals(listOf(event), repository.readNight(night.nightId)?.events)
+        assertTrue(requireNotNull(repository.readNight(night.nightId)).night.hadAudioGap)
     }
 
     @Test

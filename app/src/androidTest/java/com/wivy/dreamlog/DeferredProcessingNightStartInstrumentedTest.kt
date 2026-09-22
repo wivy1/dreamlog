@@ -24,6 +24,7 @@ import com.wivy.dreamlog.history.CaptureSessionEntity
 import com.wivy.dreamlog.history.DreamLogDatabase
 import com.wivy.dreamlog.history.NightCaptureState
 import com.wivy.dreamlog.history.NightEntity
+import com.wivy.dreamlog.history.NightEventEntity
 import com.wivy.dreamlog.history.NightRepository
 import com.wivy.dreamlog.history.ProcessingState
 import com.wivy.dreamlog.history.RawAudioState
@@ -157,6 +158,13 @@ class DeferredProcessingNightStartInstrumentedTest {
                         assertEquals(previousFiles, fileHashes(audioDirectory))
                         assertEquals(readyTranscription, transcription.value)
                         assertEquals(readyEnrichment, enrichment.value)
+                        assertEquals(listOf(nightId), repository.readHistory().map { it.night.nightId })
+                        // Listening gaps alone must not keep a no-wake night in History either.
+                        val emptyNight = requireNotNull(database.nightDao().readNight(startedNightId!!)).night
+                        database.nightDao().upsertCaptureGraph(emptyNight.copy(hadAudioGap = true), emptyList(), listOf(
+                            NightEventEntity(emptyNight.nightId, "synthetic-listening-gap", null,
+                                emptyNight.startedAtEpochMillis, 0, "audio_gap", ""),
+                        ))
                         assertEquals(listOf(nightId), repository.readHistory().map { it.night.nightId })
                         // The just-ended empty night must stay absent after a real Activity reload.
                         // Remove only our synthetic backlog so the empty History UI is observable.
